@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KERAMO BUILD - инвестиционное предложение</title>
+  <style>
+    :root {
+      --navy: #1a3c6e;
+      --ink: #20242a;
+      --muted: #65707c;
+      --line: #dfe5eb;
+      --gold: #c9a84c;
+      --soft: #f5f7fa;
+      --white: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: Arial, "Segoe UI", sans-serif;
+      background: var(--white);
+      line-height: 1.55;
+    }
+
+    .page {
+      width: min(1060px, calc(100% - 36px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      background: var(--navy);
+      color: var(--white);
+      padding: 56px 0 46px;
+    }
+
+    .brand {
+      color: var(--gold);
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      letter-spacing: 0;
+      line-height: 1.12;
+    }
+
+    h1 {
+      max-width: 820px;
+      margin-top: 18px;
+      font-size: clamp(34px, 6vw, 58px);
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 18px 0 0;
+      color: #dce8f3;
+      font-size: 19px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 32px;
+    }
+
+    .metric {
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 8px;
+      padding: 18px;
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .metric strong {
+      display: block;
+      color: var(--gold);
+      font-size: 32px;
+      line-height: 1.1;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 6px;
+      color: #eef4fa;
+    }
+
+    section {
+      padding: 42px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    section:last-child {
+      border-bottom: 0;
+    }
+
+    .section-title {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 22px;
+    }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--gold);
+      font-weight: 800;
+      text-transform: uppercase;
+      font-size: 12px;
+    }
+
+    h2 {
+      font-size: clamp(26px, 4vw, 36px);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 18px;
+    }
+
+    .card h3 {
+      margin-bottom: 8px;
+      font-size: 18px;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      counter-reset: step;
+    }
+
+    .step {
+      min-height: 130px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--white);
+      counter-increment: step;
+    }
+
+    .step::before {
+      content: counter(step);
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      margin-bottom: 10px;
+      border-radius: 8px;
+      background: var(--navy);
+      color: var(--white);
+      font-weight: 800;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--white);
+    }
+
+    th,
+    td {
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--soft);
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .offer {
+      background: var(--navy);
+      color: var(--white);
+    }
+
+    .offer .page {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 26px;
+      align-items: center;
+    }
+
+    .offer h2 {
+      color: var(--white);
+    }
+
+    .offer p,
+    .offer li {
+      color: #e8eff7;
+    }
+
+    .highlight {
+      color: var(--gold);
+      font-size: clamp(48px, 9vw, 92px);
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .offer .note {
+      color: #cfd9e5;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .summary div {
+      border-left: 3px solid var(--gold);
+      padding: 10px 12px;
+      background: var(--soft);
+    }
+
+    .footer {
+      padding: 28px 0 40px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 820px) {
+      .metrics,
+      .grid,
+      .steps,
+      .offer .page,
+      .summary {
+        grid-template-columns: 1fr;
+      }
+
+      .step {
+        min-height: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="page">
+      <div class="brand">KERAMO BUILD</div>
+      <h1>Инвестиции в производство керамогранита в Астане</h1>
+      <p class="lead">Готовая бизнес-модель полного цикла: продажа материала, нарезка под объект, доставка и монтаж. Базовый план: возврат инвестиций за 25 месяцев, затем 30% прибыли инвестору.</p>
+      <div class="metrics">
+        <div class="metric"><strong>35 млн ₸</strong><span>объем инвестиций</span></div>
+        <div class="metric"><strong>25 месяцев</strong><span>базовый срок возврата</span></div>
+        <div class="metric"><strong>30%</strong><span>доля прибыли после возврата</span></div>
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <div class="page">
+      <div class="section-title">
+        <p class="eyebrow">Рынок</p>
+        <h2>Почему эта модель имеет спрос</h2>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h3>Астана строит больше всех</h3>
+          <p>38 000+ новых квартир в год. Рынок керамогранита в городе оценивается в 15,6 млрд тенге ежегодно.</p>
+        </div>
+        <div class="card">
+          <h3>Ниша полного цикла свободна</h3>
+          <p>Магазины продают материал, мастера монтируют отдельно. KERAMO BUILD объединяет шоурум, нарезку и монтаж.</p>
+        </div>
+        <div class="card">
+          <h3>Ремонт не исчезает</h3>
+          <p>Новостройки часто сдаются без отделки, а клиенту нужен понятный подрядчик с одним договором и ответственностью.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="page">
+      <div class="section-title">
+        <p class="eyebrow">Модель</p>
+        <h2>Как устроен бизнес</h2>
+      </div>
+      <div class="steps">
+        <div class="step">Клиент видит рекламу в Instagram или TikTok и оставляет заявку.</div>
+        <div class="step">Менеджер выезжает на бесплатный замер и квалифицирует заказ.</div>
+        <div class="step">Клиент выбирает материал в шоуруме площадью 80 м².</div>
+        <div class="step">Производство 75 м² нарезает керамогранит под объект.</div>
+        <div class="step">Бригада доставляет и монтирует материал, клиент оплачивает остаток.</div>
+      </div>
+      <div class="summary">
+        <div><strong>320 000 ₸</strong><br>консервативный средний чек</div>
+        <div><strong>47%</strong><br>плановая маржа заказа</div>
+        <div><strong>40</strong><br>заказов в месяц для плана</div>
+        <div><strong>6 месяц</strong><br>выход в операционный плюс</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="offer">
+    <div class="page">
+      <div>
+        <p class="eyebrow">Условия</p>
+        <h2>Что получает инвестор</h2>
+        <p>Фаза 1: 100% чистой прибыли направляется на возврат вложенных 35 млн тенге. По базовому графику полный возврат достигается к 25-му месяцу.</p>
+        <p>Фаза 2: после возврата капитала прибыль распределяется 30% инвестору и 70% собственнику. Прогноз доли инвестора после возврата: 750 000 - 900 000 тенге в месяц.</p>
+      </div>
+      <div>
+        <div class="highlight">30%</div>
+        <p><strong>прибыли компании после возврата капитала</strong></p>
+        <p class="note">Показатели основаны на базовом финансовом сценарии. Инвестирование сопряжено с рисками, фактические результаты могут отличаться.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="page">
+      <div class="section-title">
+        <p class="eyebrow">Финансы</p>
+        <h2>Ключевые цифры проекта</h2>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Показатель</th>
+            <th>Значение</th>
+            <th>Комментарий</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Инвестиции</td>
+            <td>35 000 000 ₸</td>
+            <td>CAPEX, покрытие первых месяцев OPEX и буфер.</td>
+          </tr>
+          <tr>
+            <td>CAPEX</td>
+            <td>16 500 000 ₸</td>
+            <td>Шоурум, производство, оборудование, стартовый маркетинг.</td>
+          </tr>
+          <tr>
+            <td>OPEX в месяц</td>
+            <td>5 870 000 ₸</td>
+            <td>Аренда, команда, маркетинг, транспорт, коммунальные и операционные расходы.</td>
+          </tr>
+          <tr>
+            <td>Точка безубыточности</td>
+            <td>39 заказов / месяц</td>
+            <td>При среднем чеке 320 000 ₸ и марже 47%.</td>
+          </tr>
+          <tr>
+            <td>План 2-го года</td>
+            <td>18-25 млн ₸ чистой прибыли</td>
+            <td>Стабильный режим 50-55 заказов в месяц.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="page">
+      <div class="section-title">
+        <p class="eyebrow">Основатель</p>
+        <h2>Проект строит практик рынка</h2>
+      </div>
+      <p>Основатель KERAMO BUILD занимается керамогранитом в Астане 13 лет: поставки, продажи, работа с клиентами и управление командой. Идея проекта родилась из рыночного разрыва: клиенту нужен один подрядчик, который отвечает за материал, нарезку и монтаж, а не цепочка разрозненных исполнителей.</p>
+      <p>Операционная команда берет на себя продажи, производство, монтаж и маркетинг. Роль инвестора - войти в проект капиталом и получить прозрачную модель возврата и последующей доли в прибыли.</p>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="page">
+      <strong>KERAMO BUILD, Астана.</strong>
+      <p>Документ является коммерческим предложением и не является гарантией доходности. Финансовые показатели основаны на базовом бизнес-плане и могут меняться в зависимости от продаж, рынка, операционных расходов и управленческих решений.</p>
+    </div>
+  </footer>
+</body>
+</html>

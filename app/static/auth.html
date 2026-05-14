@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход | WA Sales Agent</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="auth-page">
+  <main class="auth-card">
+    <div>
+      <p class="eyebrow" id="authEyebrow">Админка</p>
+      <h1 id="authTitle">Вход</h1>
+      <p class="note" id="authNote">Введите логин и пароль администратора.</p>
+    </div>
+    <form id="authForm" class="auth-form">
+      <label>Логин<input id="username" autocomplete="username" required></label>
+      <label>Пароль<input id="password" type="password" autocomplete="current-password" minlength="8" required></label>
+      <button id="authSubmit" type="submit">Войти</button>
+    </form>
+    <p id="authError" class="auth-error hidden"></p>
+  </main>
+  <script src="/static/auth.js"></script>
+</body>
+</html>

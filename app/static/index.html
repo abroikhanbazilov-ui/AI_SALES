@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhatsApp AI Sales Agent</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <strong>WA Sales Agent</strong>
+          <span id="activeProjectName">Автоскоринг</span>
+        </div>
+      </div>
+      <div class="project-switcher">
+        <label>Проект<select id="projectSelect"></select></label>
+      </div>
+      <nav class="tab-nav" aria-label="Разделы сервиса">
+        <button class="tab-button active" type="button" data-tab="dashboard">Дашборд</button>
+        <button class="tab-button" type="button" data-tab="settings">Настройки</button>
+        <button class="tab-button" type="button" data-tab="projects">Проекты</button>
+        <button class="tab-button" type="button" data-tab="upload">Excel</button>
+        <button class="tab-button" type="button" data-tab="krisha">Krisha</button>
+        <button class="tab-button" type="button" data-tab="campaign">Рассылка</button>
+        <button class="tab-button" type="button" data-tab="auto">Авторабота</button>
+        <button class="tab-button" type="button" data-tab="ai">AI-режим</button>
+        <button class="tab-button" type="button" data-tab="crm">CRM</button>
+        <button class="tab-button" type="button" data-tab="contacts">Контакты</button>
+        <button class="tab-button" type="button" data-tab="logs">Логи</button>
+      </nav>
+      <a class="proposal-link" href="/proposal" target="_blank">Открыть КП</a>
+      <button id="logoutBtn" class="sidebar-logout" type="button">Выйти</button>
+    </aside>
+
+    <main>
+      <section id="dashboard" class="section tab-panel active">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Статус</p>
+            <h1>Панель холодной рассылки</h1>
+          </div>
+          <button id="refreshBtn" class="secondary">Обновить</button>
+        </div>
+        <div class="workflow">
+          <div><strong>1</strong><span>Настройки GreenAPI и AI</span></div>
+          <div><strong>2</strong><span>Загрузка Excel и проверка WhatsApp</span></div>
+          <div><strong>3</strong><span>Запуск рассылки по базе</span></div>
+          <div><strong>4</strong><span>AI обрабатывает ответы и ищет ответственного</span></div>
+          <div><strong>5</strong><span>Ответственный попадает в отдельный ценный поток</span></div>
+        </div>
+        <div id="metrics" class="metrics"></div>
+        <div class="status-grid">
+          <div class="panel">
+            <h2>Фоновые процессы</h2>
+            <div id="runtimeStatus" class="kv"></div>
+          </div>
+          <div class="panel">
+            <h2>Последние сообщения</h2>
+            <div id="recentMessages" class="message-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Ключи и модели</p>
+            <h2>Настройки интеграций</h2>
+          </div>
+          <button id="saveSettingsBtn">Сохранить</button>
+        </div>
+        <div class="form-grid">
+          <label>GreenAPI URL<input id="green_api_url" autocomplete="off"></label>
+          <label>GreenAPI Media URL<input id="green_media_url" autocomplete="off"></label>
+          <label>ID инстанса<input id="green_id_instance" autocomplete="off"></label>
+          <label>Токен инстанса<input id="green_api_token" type="password" autocomplete="off"></label>
+          <label>Код страны по умолчанию<input id="default_country_code" autocomplete="off"></label>
+          <label>AI провайдер
+            <select id="ai_provider">
+              <option value="deepseek">DeepSeek</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+          <label>OpenAI base URL<input id="openai_base_url" autocomplete="off"></label>
+          <label>OpenAI model<input id="openai_model" autocomplete="off"></label>
+          <label>OpenAI API key<input id="openai_api_key" type="password" autocomplete="off"></label>
+          <label>Groq base URL<input id="groq_base_url" autocomplete="off"></label>
+          <label>Groq transcription model<input id="groq_transcription_model" autocomplete="off"></label>
+          <label>Groq API key<input id="groq_api_key" type="password" autocomplete="off"></label>
+          <label>DeepSeek base URL<input id="deepseek_base_url" autocomplete="off"></label>
+          <label>DeepSeek model<input id="deepseek_model" autocomplete="off"></label>
+          <label>DeepSeek API key<input id="deepseek_api_key" type="password" autocomplete="off"></label>
+          <label>Расшифровка аудио
+            <select id="audio_transcription_enabled">
+              <option value="true">Включена</option>
+              <option value="false">Выключена</option>
+            </select>
+          </label>
+          <label>Температура AI<input id="ai_temperature" autocomplete="off"></label>
+          <label>Имя менеджера<input id="bot_name" autocomplete="off" placeholder="опционально"></label>
+          <label>Попыток до КП<input id="max_lpr_attempts" autocomplete="off"></label>
+          <label>КП после неудачных попыток
+            <select id="send_proposal_after_failed_attempts">
+              <option value="true">Да</option>
+              <option value="false">Нет</option>
+            </select>
+          </label>
+          <label>Статус печатает
+            <select id="typing_enabled">
+              <option value="true">Включен</option>
+              <option value="false">Выключен</option>
+            </select>
+          </label>
+          <label>Мин. печатает, сек<input id="typing_min_seconds" autocomplete="off"></label>
+          <label>Макс. печатает, сек<input id="typing_max_seconds" autocomplete="off"></label>
+          <label>Синхронизация истории, мин<input id="green_history_sync_minutes" autocomplete="off"></label>
+          <label>Уведомлять о зацепках
+            <select id="handoff_enabled">
+              <option value="true">Да</option>
+              <option value="false">Нет</option>
+            </select>
+          </label>
+          <label>Номера для зацепок<input id="handoff_phone" autocomplete="off" placeholder="+777..., +770..."></label>
+        </div>
+        <label class="wide-label">Системный промпт AI
+          <textarea id="ai_system_prompt" rows="10"></textarea>
+        </label>
+      </section>
+
+      <section id="projects" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Воркфлоу</p>
+            <h2>Проекты и продукты</h2>
+          </div>
+          <button id="saveProjectBtn">Сохранить проект</button>
+        </div>
+        <div class="project-layout">
+          <div class="panel">
+            <h3>Текущий проект</h3>
+            <div id="projectCards" class="project-cards"></div>
+            <p class="note">Переключение проекта выполняется только через выбор «Проект» в левом меню. Контакты, CRM, рассылки, КП и промпт берутся из выбранного проекта.</p>
+          </div>
+          <div class="panel">
+            <h3>Настройки выбранного проекта</h3>
+            <div class="form-grid">
+              <label>Название проекта<input id="project_name" autocomplete="off"></label>
+              <label>Продукт<input id="project_product_name" autocomplete="off"></label>
+              <label>Тип воркфлоу
+                <select id="project_workflow_type">
+                  <option value="autoscore_responsible">Автоскоринг: поиск ответственного</option>
+                  <option value="keramo_investor">KERAMO BUILD: инвесторы</option>
+                  <option value="generic_b2b">Универсальный B2B продукт</option>
+                </select>
+              </label>
+              <label>Файл КП<input id="project_proposal_filename" autocomplete="off"></label>
+            </div>
+            <label class="wide-label">Промпт проекта
+              <textarea id="project_ai_system_prompt" rows="12"></textarea>
+            </label>
+          </div>
+          <div class="panel">
+            <h3>Админ-доступ</h3>
+            <div class="form-grid">
+              <label>Текущий пароль<input id="current_password" type="password" autocomplete="current-password"></label>
+              <label>Новый пароль<input id="new_password" type="password" autocomplete="new-password"></label>
+              <label>Повтор нового пароля<input id="new_password_repeat" type="password" autocomplete="new-password"></label>
+            </div>
+            <button id="changePasswordBtn" class="secondary" type="button">Сменить пароль</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="upload" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">База из 2ГИС</p>
+            <h2>Загрузка Excel и выбор столбцов</h2>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="upload-row">
+            <input id="excelFile" type="file" accept=".xlsx,.xls,.xlsm">
+            <button id="uploadBtn">Загрузить файл</button>
+            <button id="checkWhatsappBtn" class="secondary">Проверить WhatsApp заново</button>
+            <button id="resetSalesDataBtn" class="danger" type="button">Очистить тестовую базу</button>
+          </div>
+          <div id="columnChooser" class="column-chooser hidden">
+            <label>Столбцы с номерами<select id="phoneColumn" multiple size="6"></select></label>
+            <label>Организация<select id="companyColumn"></select></label>
+            <label>Имя<select id="nameColumn"></select></label>
+            <label>Контекст / сигналы<select id="signalColumns" multiple size="6"></select></label>
+            <button id="importBtn">Импортировать и проверить WhatsApp</button>
+          </div>
+          <div id="preview" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="krisha" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">KERAMO BUILD</p>
+            <h2>Krisha-парсер и база собственников</h2>
+          </div>
+        </div>
+        <div class="panel">
+          <p class="note krisha-note">Раздел работает только для проекта KERAMO BUILD. Парсер авторизуется в Krisha, хранит сессию, открывает коммерческие объявления по заданным фильтрам, раскрывает доступные телефоны, сохраняет номера в БД и запускает проверку WhatsApp. CAPTCHA не обходится: при защите парсер остановится и покажет статус.</p>
+          <div class="form-grid krisha-filters">
+            <label>Логин Krisha<input id="krisha_login" autocomplete="off" placeholder="+7... или email"></label>
+            <label>Пароль Krisha<input id="krisha_password" type="password" autocomplete="off"></label>
+            <label>Город<input id="krisha_city" autocomplete="off"></label>
+            <label>Тип объекта
+              <select id="krisha_property_type">
+                <option value="commercial">Коммерческая недвижимость</option>
+                <option value="office">Офисы</option>
+                <option value="retail">Магазины / ритейл</option>
+                <option value="warehouse">Склады / производство</option>
+                <option value="catering">Общепит</option>
+                <option value="building">Здания</option>
+                <option value="any">Любой</option>
+              </select>
+            </label>
+            <label>Ключевые слова<input id="krisha_keywords" autocomplete="off" placeholder="собственник, БЦ, помещение"></label>
+            <label>Площадь от, м²<input id="krisha_min_area" type="number" min="0" step="1"></label>
+            <label>Площадь до, м²<input id="krisha_max_area" type="number" min="0" step="1"></label>
+            <label>Цена от, ₸<input id="krisha_min_price" type="number" min="0" step="100000"></label>
+            <label>Цена до, ₸<input id="krisha_max_price" type="number" min="0" step="100000"></label>
+            <label>Страниц поиска<input id="krisha_max_pages" type="number" min="1" max="10"></label>
+            <label>Номеров собрать<input id="krisha_max_contacts" type="number" min="1" max="10000" step="1" placeholder="без лимита"></label>
+            <label>Интервал фона, мин<input id="krisha_interval_minutes" type="number" min="1" step="1"></label>
+          </div>
+          <div class="toggle-row krisha-toggles">
+            <label><input id="krisha_use_browser" type="checkbox" value="true"> Браузерный режим</label>
+            <label><input id="krisha_headless" type="checkbox" value="true"> Скрытый браузер</label>
+          </div>
+          <div class="upload-row krisha-actions">
+            <button id="saveKrishaSettingsBtn" class="secondary" type="button">Сохранить настройки</button>
+            <button id="parseKrishaBtn" type="button">Разовый импорт</button>
+            <button id="startKrishaParserBtn" type="button">Запустить фон</button>
+            <button id="stopKrishaParserBtn" class="danger" type="button">Остановить фон</button>
+            <button id="checkWhatsappKrishaBtn" class="secondary" type="button">Проверить WhatsApp</button>
+          </div>
+          <div id="krishaParserStatus" class="krisha-result"></div>
+          <div id="krishaResult" class="krisha-result"></div>
+          <div id="krishaPreview" class="table-wrap hidden"></div>
+          <div class="section-head krisha-log-head">
+            <div>
+              <p class="eyebrow">Отладка</p>
+              <h3>Логи Krisha</h3>
+            </div>
+            <span class="pill">live</span>
+          </div>
+          <div id="krishaEvents" class="event-feed"></div>
+        </div>
+      </section>
+
+      <section id="campaign" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Первый поток</p>
+            <h2>Рассылка по исходной базе</h2>
+          </div>
+        </div>
+        <div class="panel campaign-controls">
+          <label>Количество сообщений<input id="max_messages" type="number" min="1" value="25"></label>
+          <label>Мин. задержка, сек<input id="delay_min_seconds" type="number" min="1" value="40"></label>
+          <label>Макс. задержка, сек<input id="delay_max_seconds" type="number" min="1" value="120"></label>
+          <button id="startCampaignBtn">Запустить</button>
+          <button id="pauseCampaignBtn" class="secondary">Пауза</button>
+          <button id="resumeCampaignBtn" class="secondary">Продолжить</button>
+          <button id="stopCampaignBtn" class="danger">Стоп</button>
+        </div>
+        <div class="ops-grid">
+          <div class="panel">
+            <h3>Состояние рассылки</h3>
+            <div id="campaignStatusPanel" class="kv"></div>
+          </div>
+          <div class="panel">
+            <h3>Что происходит</h3>
+            <div id="campaignEvents" class="event-feed"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="auto" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Планировщик</p>
+            <h2>Авторабота по проекту</h2>
+          </div>
+          <button id="saveAutoWorkSettingsBtn" type="button">Сохранить автоработу</button>
+        </div>
+        <div class="panel">
+          <div class="form-grid">
+            <label>Автозапуск рассылки
+              <select id="auto_campaign_enabled">
+                <option value="false">Выключен</option>
+                <option value="true">Включен</option>
+              </select>
+            </label>
+            <label>Время запуска каждый день<input id="auto_campaign_time" type="time"></label>
+            <label>Часовой пояс<input id="auto_campaign_timezone" autocomplete="off" placeholder="Asia/Qyzylorda"></label>
+            <label>Сообщений в день<input id="auto_campaign_max_messages" type="number" min="1" max="10000"></label>
+            <label>Мин. задержка, сек<input id="auto_campaign_delay_min_seconds" type="number" min="1" max="86400"></label>
+            <label>Макс. задержка, сек<input id="auto_campaign_delay_max_seconds" type="number" min="1" max="86400"></label>
+            <label>Поток контактов
+              <select id="auto_campaign_target_kind">
+                <option value="lead">Исходная база</option>
+                <option value="lpr">Ответственные</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="ops-grid">
+          <div class="panel">
+            <h3>Состояние автоработы</h3>
+            <div id="autoWorkStatusPanel" class="kv"></div>
+          </div>
+          <div class="panel">
+            <h3>Что происходит</h3>
+            <div id="autoWorkEvents" class="event-feed"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="ai" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Второй поток</p>
+            <h2>AI-бот для ответивших клиентов</h2>
+          </div>
+          <div class="toggle-row">
+            <span id="aiState">выключен</span>
+            <button id="enableAiBtn">Включить</button>
+            <button id="disableAiBtn" class="secondary">Выключить</button>
+          </div>
+        </div>
+        <p class="note">AI-режим читает входящие через GreenAPI long polling, хранит контекст, ищет контакт ответственного, помечает ценные номера и отправляет им КП другим скриптом.</p>
+        <div class="ops-grid">
+          <div class="panel">
+            <h3>Состояние AI</h3>
+            <div id="aiStatusPanel" class="kv"></div>
+          </div>
+          <div class="panel">
+            <h3>Что происходит</h3>
+            <div id="aiEvents" class="event-feed"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="crm" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Сделки</p>
+            <h2>CRM-канбан</h2>
+          </div>
+          <div class="filters">
+            <input id="crmSearch" placeholder="поиск сделки">
+            <button id="refreshCrmBtn" class="secondary">Обновить</button>
+            <button id="deleteFilteredDealsBtn" class="danger" type="button">Удалить сделки по фильтру</button>
+          </div>
+        </div>
+        <div id="crmBoard" class="kanban-board"></div>
+      </section>
+
+      <section id="contacts" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">CRM</p>
+            <h2>Контакты и статусы</h2>
+          </div>
+          <div class="filters">
+            <select id="kindFilter">
+              <option value="">Все</option>
+              <option value="lead">Исходная база</option>
+              <option value="lpr">Ответственные</option>
+            </select>
+            <select id="statusFilter">
+              <option value="">Все статусы</option>
+              <option value="interested">Зацепки</option>
+              <option value="proposal_sent">КП отправлено</option>
+              <option value="sent">Отправлено</option>
+              <option value="replied">Ответили</option>
+              <option value="not_interested">Не сейчас</option>
+              <option value="no_whatsapp">Нет WhatsApp</option>
+              <option value="opt_out">Отказ</option>
+              <option value="error">Ошибка</option>
+            </select>
+            <input id="searchContacts" placeholder="поиск">
+            <button id="selectAllContactsBtn" class="secondary" type="button">Выделить все</button>
+            <button id="clearSelectedContactsBtn" class="secondary" type="button">Снять</button>
+            <button id="deleteSelectedContactsBtn" class="danger" type="button">Удалить выбранные</button>
+            <button id="deleteFilteredContactsBtn" class="danger" type="button">Удалить по фильтру</button>
+            <button id="resetSalesDataContactsBtn" class="danger" type="button">Обнулить базу</button>
+            <span id="selectedContactsCount" class="note contact-selection-note">Ничего не выбрано</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="table-checkbox"><input id="selectAllContactsCheckbox" type="checkbox" aria-label="Выделить все контакты на странице"></th>
+                <th>ID</th>
+                <th>Тип</th>
+                <th>Телефон</th>
+                <th>Имя</th>
+                <th>Организация</th>
+                <th>WhatsApp</th>
+                <th>Статус</th>
+                <th>Источник</th>
+                <th>Ошибка</th>
+              </tr>
+            </thead>
+            <tbody id="contactsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="logs" class="section tab-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Журнал событий</p>
+            <h2>Логи сервиса</h2>
+          </div>
+          <div class="filters">
+            <select id="logLevelFilter">
+              <option value="">Все уровни</option>
+              <option value="info">Info</option>
+              <option value="warning">Warning</option>
+              <option value="error">Error</option>
+            </select>
+            <select id="logCategoryFilter">
+              <option value="">Все события</option>
+              <option value="settings">Настройки</option>
+              <option value="import">Импорт</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="campaign">Кампания</option>
+              <option value="message">Сообщения</option>
+              <option value="proposal">КП</option>
+              <option value="handoff">Зацепки</option>
+              <option value="lpr">Ответственные</option>
+              <option value="ai">AI</option>
+              <option value="contact">Контакты</option>
+            </select>
+            <input id="searchLogs" placeholder="поиск в логах">
+            <button id="refreshLogsBtn" class="secondary">Обновить</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Время</th>
+                <th>Уровень</th>
+                <th>Категория</th>
+                <th>Событие</th>
+                <th>Контакт</th>
+              </tr>
+            </thead>
+            <tbody id="logsBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div id="dealModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Диалог сделки">
+    <div class="modal-backdrop" id="dealModalBackdrop"></div>
+    <div class="deal-panel">
+      <div class="deal-panel-head">
+        <div>
+          <p class="eyebrow" id="dealStageLabel">CRM</p>
+          <h2 id="dealTitle">Диалог</h2>
+          <p id="dealSubtitle" class="note"></p>
+        </div>
+        <div class="deal-head-actions">
+          <button id="deleteDealBtn" class="danger" type="button">Удалить сделку</button>
+          <button id="closeDealBtn" class="secondary" type="button">Закрыть</button>
+        </div>
+      </div>
+      <div id="dealMeta" class="deal-meta"></div>
+      <div id="dealMessages" class="whatsapp-thread"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

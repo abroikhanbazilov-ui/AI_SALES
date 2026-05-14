@@ -1,0 +1,1545 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Коммерческое предложение | Автоскоринг</title>
+  <style>
+    :root {
+      --ink: #17201b;
+      --muted: #647169;
+      --line: #d9e0d8;
+      --paper: #f7f5ef;
+      --white: #ffffff;
+      --green: #0f6b4f;
+      --green-dark: #083f32;
+      --lime: #c8f05d;
+      --blue: #155d8a;
+      --amber: #f3b647;
+      --red: #d9634a;
+      --shadow: 0 24px 70px rgba(18, 34, 27, 0.14);
+      --radius: 8px;
+      --max: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      overflow-x: hidden;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(120deg, rgba(15, 107, 79, 0.08), transparent 34%),
+        radial-gradient(circle at 82% 8%, rgba(243, 182, 71, 0.22), transparent 28%),
+        var(--paper);
+      color: var(--ink);
+      font-family: "Aptos", "Manrope", "Segoe UI", sans-serif;
+      line-height: 1.45;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .page {
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(23, 32, 27, 0.08);
+      background: rgba(247, 245, 239, 0.86);
+      backdrop-filter: blur(18px);
+    }
+
+    .nav-inner {
+      width: min(var(--max), calc(100% - 40px));
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 72px;
+      gap: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, var(--lime), rgba(200, 240, 93, 0) 54%),
+        linear-gradient(135deg, var(--green), var(--green-dark));
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .nav-links a {
+      padding: 8px 0;
+    }
+
+    .nav-links a:hover {
+      color: var(--ink);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 18px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: var(--green);
+      color: var(--white);
+      font-weight: 750;
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      background: var(--green-dark);
+      box-shadow: 0 12px 28px rgba(15, 107, 79, 0.22);
+    }
+
+    .btn.secondary {
+      background: transparent;
+      border-color: rgba(23, 32, 27, 0.18);
+      color: var(--ink);
+      box-shadow: none;
+    }
+
+    .btn.secondary:hover {
+      border-color: var(--green);
+      color: var(--green-dark);
+      background: rgba(255, 255, 255, 0.5);
+    }
+
+    section {
+      position: relative;
+      padding: 92px 0;
+    }
+
+    .container {
+      width: min(var(--max), calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      min-height: calc(100vh - 72px);
+      display: flex;
+      align-items: center;
+      padding: 74px 0 56px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.02fr) minmax(360px, 0.78fr);
+      gap: 56px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      color: var(--green-dark);
+      font-size: 13px;
+      font-weight: 850;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      max-width: 100%;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 2px;
+      background: var(--green);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 820px;
+      margin-bottom: 24px;
+      font-family: "Georgia", "Times New Roman", serif;
+      font-size: clamp(48px, 6.7vw, 92px);
+      line-height: 0.96;
+      letter-spacing: 0;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+      hyphens: auto;
+    }
+
+    h2 {
+      max-width: 820px;
+      margin-bottom: 18px;
+      font-family: "Georgia", "Times New Roman", serif;
+      font-size: clamp(34px, 4.2vw, 58px);
+      line-height: 1.02;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+      hyphens: auto;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 20px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 730px;
+      margin-bottom: 34px;
+      color: #34433a;
+      font-size: clamp(18px, 2vw, 23px);
+      line-height: 1.45;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 0 0 36px;
+    }
+
+    .hero-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      max-width: 760px;
+    }
+
+    .metric {
+      min-height: 118px;
+      padding: 20px;
+      border: 1px solid rgba(23, 32, 27, 0.1);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: 0 16px 50px rgba(18, 34, 27, 0.08);
+    }
+
+    .metric strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: clamp(24px, 3vw, 36px);
+      line-height: 1;
+      color: var(--green-dark);
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .phone-stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 650px;
+    }
+
+    .phone-stage::before {
+      content: "";
+      position: absolute;
+      inset: 80px 14px 72px;
+      border-radius: 34px;
+      background:
+        linear-gradient(135deg, rgba(21, 93, 138, 0.20), transparent 50%),
+        linear-gradient(135deg, rgba(15, 107, 79, 0.18), rgba(200, 240, 93, 0.20));
+      transform: rotate(-6deg);
+      filter: blur(0.2px);
+    }
+
+    .phone {
+      position: relative;
+      width: min(360px, 92vw);
+      min-height: 650px;
+      padding: 16px;
+      border-radius: 42px;
+      background: #101511;
+      box-shadow: var(--shadow);
+    }
+
+    .phone::before {
+      content: "";
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      width: 112px;
+      height: 26px;
+      border-radius: 0 0 16px 16px;
+      background: #101511;
+      transform: translateX(-50%);
+      z-index: 3;
+    }
+
+    .screen {
+      position: relative;
+      min-height: 618px;
+      padding: 34px 18px 18px;
+      border-radius: 30px;
+      overflow: hidden;
+      background:
+        linear-gradient(160deg, rgba(200, 240, 93, 0.26), transparent 35%),
+        linear-gradient(180deg, #f9fbf5, #edf2ec);
+    }
+
+    .screen-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 22px;
+      color: var(--green-dark);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .app-title {
+      margin-bottom: 16px;
+      font-family: "Georgia", "Times New Roman", serif;
+      font-size: 31px;
+      line-height: 1.03;
+      overflow-wrap: anywhere;
+    }
+
+    .score-card {
+      padding: 16px;
+      border-radius: 8px;
+      background: var(--green-dark);
+      color: white;
+      box-shadow: 0 16px 38px rgba(8, 63, 50, 0.24);
+    }
+
+    .score-card small {
+      display: block;
+      margin-bottom: 8px;
+      color: rgba(255, 255, 255, 0.68);
+      font-weight: 750;
+    }
+
+    .score-line {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .score-line strong {
+      font-size: 42px;
+      line-height: 0.95;
+    }
+
+    .score-pill {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: var(--lime);
+      color: var(--green-dark);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .offer-list {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0;
+    }
+
+    .offer {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid rgba(23, 32, 27, 0.08);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.86);
+    }
+
+    .logo-dot {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      background: #e4efe8;
+      color: var(--green-dark);
+      font-weight: 900;
+    }
+
+    .offer b {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 14px;
+    }
+
+    .offer span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .offer-price {
+      color: var(--green-dark);
+      font-size: 12px;
+      font-weight: 900;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .car-strip {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .car {
+      min-height: 116px;
+      padding: 12px;
+      border-radius: 8px;
+      background:
+        linear-gradient(145deg, rgba(21, 93, 138, 0.16), transparent 62%),
+        #ffffff;
+      border: 1px solid rgba(23, 32, 27, 0.08);
+    }
+
+    .car-shape {
+      height: 34px;
+      margin: 12px 2px 14px;
+      border-radius: 22px 28px 8px 8px;
+      background: linear-gradient(90deg, var(--green), var(--blue));
+      position: relative;
+    }
+
+    .car-shape::before,
+    .car-shape::after {
+      content: "";
+      position: absolute;
+      bottom: -8px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #141b16;
+    }
+
+    .car-shape::before {
+      left: 18px;
+    }
+
+    .car-shape::after {
+      right: 18px;
+    }
+
+    .car b {
+      display: block;
+      font-size: 13px;
+    }
+
+    .car span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(280px, 0.55fr);
+      gap: 42px;
+      align-items: end;
+      margin-bottom: 38px;
+    }
+
+    .section-copy {
+      color: #3e4b43;
+      font-size: 19px;
+    }
+
+    .band {
+      background: #102018;
+      color: #eef5ee;
+    }
+
+    .band .eyebrow,
+    .band h2 {
+      color: #ffffff;
+    }
+
+    .band .eyebrow::before {
+      background: var(--lime);
+    }
+
+    .band .section-copy,
+    .band .muted {
+      color: rgba(238, 245, 238, 0.72);
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      min-height: 220px;
+      padding: 26px;
+      border: 1px solid rgba(23, 32, 27, 0.10);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: 0 16px 50px rgba(18, 34, 27, 0.06);
+    }
+
+    .band .card {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: none;
+    }
+
+    .card-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      margin-bottom: 24px;
+      border-radius: 8px;
+      background: var(--lime);
+      color: var(--green-dark);
+      font-size: 14px;
+      font-weight: 900;
+    }
+
+    .card p {
+      margin-bottom: 0;
+      color: var(--muted);
+    }
+
+    .band .card p {
+      color: rgba(238, 245, 238, 0.68);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .flow-step {
+      position: relative;
+      min-height: 180px;
+      padding: 22px;
+      border-radius: var(--radius);
+      background: #ffffff;
+      border: 1px solid rgba(23, 32, 27, 0.10);
+    }
+
+    .flow-step::after {
+      content: "";
+      position: absolute;
+      top: 35px;
+      right: -15px;
+      width: 20px;
+      height: 2px;
+      background: var(--green);
+      z-index: 2;
+    }
+
+    .flow-step:last-child::after {
+      display: none;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-bottom: 12px;
+      color: var(--green-dark);
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .flow-step p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(320px, 0.82fr) minmax(0, 1fr);
+      gap: 52px;
+      align-items: center;
+    }
+
+    .panel {
+      padding: 30px;
+      border-radius: var(--radius);
+      background: var(--white);
+      border: 1px solid rgba(23, 32, 27, 0.10);
+      box-shadow: var(--shadow);
+    }
+
+    .check-list {
+      display: grid;
+      gap: 14px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .check-list li {
+      position: relative;
+      padding-left: 34px;
+      color: #34433a;
+    }
+
+    .check-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 2px;
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      background:
+        linear-gradient(135deg, transparent 48%, var(--green-dark) 49% 56%, transparent 57%),
+        var(--lime);
+      box-shadow: inset 0 0 0 1px rgba(8, 63, 50, 0.08);
+    }
+
+    .feature-table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.8);
+      box-shadow: 0 16px 50px rgba(18, 34, 27, 0.06);
+    }
+
+    .feature-table th,
+    .feature-table td {
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(23, 32, 27, 0.09);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .feature-table th {
+      background: #e9efe8;
+      color: var(--green-dark);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .feature-table td:first-child {
+      width: 28%;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .feature-table td {
+      color: #405046;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .week {
+      min-height: 230px;
+      padding: 22px;
+      border-right: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.055);
+    }
+
+    .week:last-child {
+      border-right: 0;
+    }
+
+    .week strong {
+      display: block;
+      margin-bottom: 18px;
+      color: var(--lime);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .week p {
+      margin-bottom: 0;
+      color: rgba(238, 245, 238, 0.75);
+      font-size: 15px;
+    }
+
+    .price-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(340px, 0.72fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .price-main {
+      padding: 34px;
+      border-radius: var(--radius);
+      background:
+        linear-gradient(135deg, rgba(200, 240, 93, 0.20), transparent 52%),
+        var(--green-dark);
+      color: #ffffff;
+      box-shadow: var(--shadow);
+    }
+
+    .price-main .price {
+      margin: 18px 0 10px;
+      font-family: "Georgia", "Times New Roman", serif;
+      font-size: clamp(48px, 6vw, 82px);
+      line-height: 0.94;
+    }
+
+    .price-main p {
+      max-width: 720px;
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 18px;
+    }
+
+    .price-side {
+      display: grid;
+      gap: 18px;
+    }
+
+    .mini-price {
+      padding: 28px;
+      border-radius: var(--radius);
+      background: #ffffff;
+      border: 1px solid rgba(23, 32, 27, 0.10);
+    }
+
+    .mini-price strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 28px;
+      color: var(--green-dark);
+    }
+
+    .mini-price span {
+      color: var(--muted);
+    }
+
+    .deliverables {
+      columns: 2;
+      column-gap: 34px;
+      margin: 22px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .deliverables li {
+      break-inside: avoid;
+      position: relative;
+      margin-bottom: 12px;
+      padding-left: 22px;
+      color: rgba(255, 255, 255, 0.84);
+    }
+
+    .deliverables li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 9px;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--lime);
+    }
+
+    .cta {
+      padding: 76px 0;
+      background:
+        linear-gradient(90deg, rgba(15, 107, 79, 0.96), rgba(8, 63, 50, 0.96)),
+        var(--green-dark);
+      color: #ffffff;
+    }
+
+    .cta-inner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .cta h2 {
+      margin-bottom: 12px;
+      color: #ffffff;
+    }
+
+    .cta p {
+      max-width: 760px;
+      margin-bottom: 0;
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 19px;
+    }
+
+    .cta .btn {
+      background: var(--lime);
+      color: var(--green-dark);
+    }
+
+    .whatsapp-btn {
+      background: var(--lime);
+      color: var(--green-dark);
+      min-width: 330px;
+      min-height: 64px;
+      padding: 0 28px;
+      font-size: 17px;
+      box-shadow: 0 18px 42px rgba(200, 240, 93, 0.18);
+    }
+
+    .whatsapp-btn::before {
+      content: "";
+      width: 16px;
+      height: 16px;
+      margin-right: 10px;
+      border-radius: 50%;
+      background: #1fbf62;
+      box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0.75);
+    }
+
+    .whatsapp-btn:hover {
+      background: #b9e54c;
+      color: var(--green-dark);
+    }
+
+    .whatsapp-btn.compact {
+      min-width: 230px;
+      min-height: 44px;
+      padding: 0 18px;
+      font-size: 15px;
+    }
+
+    .price-contact {
+      display: grid;
+      gap: 16px;
+    }
+
+    .price-contact .btn {
+      width: 100%;
+    }
+
+    .note {
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .mobile-break {
+      display: none;
+    }
+
+    @media (max-width: 1040px) {
+      .hero-grid,
+      .section-head,
+      .split,
+      .price-layout,
+      .cta-inner {
+        grid-template-columns: 1fr;
+      }
+
+      .phone-stage {
+        min-height: 600px;
+      }
+
+      .flow,
+      .timeline {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .flow-step::after {
+        display: none;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .nav-inner {
+        width: min(var(--max), calc(100% - 28px));
+        min-height: 64px;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      section {
+        padding: 56px 0;
+      }
+
+      .container {
+        width: min(var(--max), calc(100% - 28px));
+      }
+
+      .hero {
+        min-height: auto;
+        padding: 42px 0 36px;
+      }
+
+      .hero-grid {
+        gap: 34px;
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 16px;
+        font-size: 11px;
+        line-height: 1.28;
+        letter-spacing: 0.06em;
+      }
+
+      .eyebrow::before {
+        width: 24px;
+        min-width: 24px;
+        margin-top: 6px;
+      }
+
+      h1 {
+        margin-bottom: 18px;
+        font-size: clamp(34px, 10.5vw, 44px);
+        line-height: 1.02;
+      }
+
+      .mobile-break {
+        display: block;
+      }
+
+      h2 {
+        font-size: clamp(29px, 8.5vw, 38px);
+        line-height: 1.06;
+      }
+
+      h3 {
+        font-size: 18px;
+      }
+
+      .lead,
+      .section-copy,
+      .cta p {
+        font-size: 16px;
+      }
+
+      .hero-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+        margin-bottom: 28px;
+      }
+
+      .btn {
+        width: 100%;
+        min-height: 46px;
+        padding: 0 14px;
+        text-align: center;
+      }
+
+      .whatsapp-btn {
+        min-width: 0;
+        min-height: 58px;
+        font-size: 15px;
+      }
+
+      .hero-metrics,
+      .grid-3,
+      .grid-2,
+      .flow,
+      .timeline {
+        grid-template-columns: 1fr;
+      }
+
+      .metric {
+        min-height: auto;
+        padding: 16px;
+      }
+
+      .metric strong {
+        font-size: 24px;
+        line-height: 1.08;
+      }
+
+      .phone-stage {
+        min-height: auto;
+      }
+
+      .phone-stage::before {
+        inset: 34px 0 24px;
+        border-radius: 24px;
+      }
+
+      .phone {
+        width: min(100%, 340px);
+        min-height: auto;
+        padding: 10px;
+        border-radius: 30px;
+      }
+
+      .phone::before {
+        top: 8px;
+        width: 88px;
+        height: 20px;
+        border-radius: 0 0 12px 12px;
+      }
+
+      .screen {
+        min-height: auto;
+        padding: 28px 12px 12px;
+        border-radius: 22px;
+      }
+
+      .screen-top {
+        margin-bottom: 14px;
+      }
+
+      .app-title {
+        font-size: 25px;
+      }
+
+      .score-card {
+        padding: 14px;
+      }
+
+      .score-line strong {
+        font-size: 34px;
+      }
+
+      .offer {
+        grid-template-columns: 38px minmax(0, 1fr);
+        align-items: start;
+      }
+
+      .logo-dot {
+        width: 38px;
+        height: 38px;
+      }
+
+      .offer-price {
+        grid-column: 2;
+        text-align: left;
+      }
+
+      .car-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .section-head {
+        gap: 14px;
+        margin-bottom: 26px;
+      }
+
+      .card,
+      .panel,
+      .price-main,
+      .mini-price {
+        padding: 20px;
+      }
+
+      .card {
+        min-height: auto;
+      }
+
+      .flow-step {
+        min-height: auto;
+        padding: 18px;
+      }
+
+      .feature-table,
+      .feature-table tbody,
+      .feature-table tr,
+      .feature-table td,
+      .feature-table th {
+        display: block;
+        width: 100%;
+      }
+
+      .feature-table thead {
+        display: none;
+      }
+
+      .feature-table tr {
+        border-bottom: 1px solid rgba(23, 32, 27, 0.10);
+      }
+
+      .feature-table td {
+        border-bottom: 0;
+        padding: 12px 16px;
+      }
+
+      .feature-table td:first-child {
+        width: 100%;
+        padding-top: 18px;
+      }
+
+      .deliverables {
+        columns: 1;
+      }
+
+      .price-main .price {
+        font-size: clamp(38px, 11vw, 52px);
+        line-height: 1;
+      }
+    }
+
+    @media (max-width: 420px) {
+      .nav-inner,
+      .container {
+        width: min(var(--max), calc(100% - 24px));
+      }
+
+      .brand {
+        gap: 9px;
+        font-size: 13px;
+      }
+
+      .brand-mark {
+        width: 30px;
+        height: 30px;
+      }
+
+      .eyebrow::before {
+        display: none;
+      }
+
+      h1 {
+        font-size: clamp(30px, 8.8vw, 36px);
+      }
+
+      .lead {
+        font-size: 15px;
+      }
+
+      .phone {
+        width: min(100%, 312px);
+      }
+
+      .phone-stage::before {
+        inset: 28px 14px 20px;
+      }
+
+      .app-title {
+        font-size: 23px;
+      }
+
+      .score-pill {
+        padding: 6px 8px;
+        font-size: 11px;
+      }
+
+      .price-main .price {
+        font-size: clamp(34px, 10vw, 44px);
+      }
+
+      .mini-price strong {
+        font-size: 23px;
+      }
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+      }
+
+      .nav,
+      .hero-actions,
+      .cta .btn {
+        display: none;
+      }
+
+      section,
+      .hero,
+      .cta {
+        padding: 34px 0;
+        min-height: auto;
+        break-inside: avoid;
+      }
+
+      .card,
+      .panel,
+      .price-main,
+      .mini-price,
+      .metric {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="brand" href="#top" aria-label="Автоскоринг">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Автоскоринг</span>
+        </a>
+        <nav class="nav-links" aria-label="Разделы презентации">
+          <a href="#product">Продукт</a>
+          <a href="#flow">Сценарий</a>
+          <a href="#modules">Модули</a>
+          <a href="#terms">Стоимость</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="container hero-grid">
+          <div>
+            <div class="eyebrow">Коммерческое предложение для автодилера</div>
+            <h1>Мобильное приложение автоскоринга <br class="mobile-break">под ваш бренд</h1>
+            <p class="lead">
+              Запускаем iOS и Android приложение, где клиент проходит автоматизированный скоринг, получает подборку автокредитов от банков и МФО, сравнивает условия и выбирает автомобиль из каталога дилера.
+            </p>
+            <div class="hero-actions">
+              <a class="btn" href="#terms">Смотреть стоимость</a>
+              <a class="btn secondary" href="#flow">Как работает путь клиента</a>
+              <a
+                class="btn whatsapp-btn compact"
+                href="https://wa.me/77759419359?text=%D0%97%D0%B4%D1%80%D0%B0%D0%B2%D1%81%D1%82%D0%B2%D1%83%D0%B9%D1%82%D0%B5!%20%D0%9E%D0%B7%D0%BD%D0%B0%D0%BA%D0%BE%D0%BC%D0%B8%D0%BB%D1%81%D1%8F%20%D1%81%20%D0%B2%D0%B0%D1%88%D0%B8%D0%BC%20%D0%9A%D0%9F%20%D0%BF%D0%BE%20%D0%BC%D0%BE%D0%B1%D0%B8%D0%BB%D1%8C%D0%BD%D0%BE%D0%BC%D1%83%20%D0%BF%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D1%8E%20%D0%B0%D0%B2%D1%82%D0%BE%D1%81%D0%BA%D0%BE%D1%80%D0%B8%D0%BD%D0%B3%D0%B0.%20%D0%A5%D0%BE%D1%82%D0%B5%D0%BB%20%D0%B1%D1%8B%20%D0%BE%D0%B1%D1%81%D1%83%D0%B4%D0%B8%D1%82%D1%8C%20%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%20%D1%81%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D1%87%D0%B5%D1%81%D1%82%D0%B2%D0%B0%20%D0%B8%20%D0%BD%D0%B0%D0%B7%D0%BD%D0%B0%D1%87%D0%B8%D1%82%D1%8C%20%D0%B6%D0%B8%D0%B2%D1%83%D1%8E%20%D0%B2%D1%81%D1%82%D1%80%D0%B5%D1%87%D1%83%20%D0%B2%20%D0%B3.%20%D0%90%D1%81%D1%82%D0%B0%D0%BD%D0%B0."
+                target="_blank"
+                rel="noopener noreferrer"
+              >Связаться в WhatsApp</a>
+            </div>
+            <div class="hero-metrics" aria-label="Ключевые параметры предложения">
+              <div class="metric">
+                <strong>5-15 млн ₸</strong>
+                <span>разработка и выкатка двух приложений под ключ</span>
+              </div>
+              <div class="metric">
+                <strong>iOS + Android</strong>
+                <span>два приложения для публикации на площадках</span>
+              </div>
+              <div class="metric">
+                <strong>200-500 тыс. ₸</strong>
+                <span>ежемесячная поддержка после релиза</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="phone-stage" aria-label="Макет мобильного приложения">
+            <div class="phone">
+              <div class="screen">
+                <div class="screen-top">
+                  <span>AutoScore</span>
+                  <span>09:41</span>
+                </div>
+                <div class="app-title">Ваш кредитный маршрут готов</div>
+                <div class="score-card">
+                  <small>Предварительный скоринг</small>
+                  <div class="score-line">
+                    <strong>82%</strong>
+                    <span class="score-pill">высокий шанс</span>
+                  </div>
+                </div>
+                <div class="offer-list">
+                  <div class="offer">
+                    <div class="logo-dot">Б</div>
+                    <div>
+                      <b>Банк Авто</b>
+                      <span>до 7 лет, перв. взнос от 10%</span>
+                    </div>
+                    <div class="offer-price">от 12.9%</div>
+                  </div>
+                  <div class="offer">
+                    <div class="logo-dot">М</div>
+                    <div>
+                      <b>МФО Drive</b>
+                      <span>быстрое решение, минимум документов</span>
+                    </div>
+                    <div class="offer-price">15 мин.</div>
+                  </div>
+                  <div class="offer">
+                    <div class="logo-dot">A</div>
+                    <div>
+                      <b>Партнер Auto</b>
+                      <span>лучше для выбранной модели</span>
+                    </div>
+                    <div class="offer-price">топ-1</div>
+                  </div>
+                </div>
+                <div class="car-strip">
+                  <div class="car">
+                    <div class="car-shape"></div>
+                    <b>Sedan Comfort</b>
+                    <span>от 142 000 ₸/мес.</span>
+                  </div>
+                  <div class="car">
+                    <div class="car-shape"></div>
+                    <b>Crossover Pro</b>
+                    <span>от 188 000 ₸/мес.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="product" class="band">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Суть направления</div>
+              <h2>Дилер получает собственный цифровой канал продаж автомобилей в кредит</h2>
+            </div>
+            <p class="section-copy">
+              Покупатель запускает таргетированную рекламу, ведет трафик в приложение и получает не просто лид, а клиента с уже пройденным скорингом, выбранными кредитными условиями и интересом к конкретным автомобилям.
+            </p>
+          </div>
+
+          <div class="grid-3">
+            <article class="card">
+              <span class="card-num">01</span>
+              <h3>White-label под Ваш бренд</h3>
+              <p>Название, цвета, визуальная подача, каталог, контакты и офферы оформляются под бренд автодилера или дилерской сети.</p>
+            </article>
+            <article class="card">
+              <span class="card-num">02</span>
+              <h3>Автоскоринг внутри приложения</h3>
+              <p>Клиент заполняет анкету, проходит первичную оценку платежеспособности и получает персональный кредитный маршрут.</p>
+            </article>
+            <article class="card">
+              <span class="card-num">03</span>
+              <h3>Подбор кредитов и автомобилей</h3>
+              <p>Приложение сравнивает предложения банков и МФО, показывает подходящие условия и связывает их с каталогом автомобилей клиента.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="flow">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Путь клиента</div>
+              <h2>От рекламы до заявки на авто без ручного отбора</h2>
+            </div>
+            <p class="section-copy">
+              Основная идея: не отправлять холодный трафик менеджеру сразу. Сначала приложение квалифицирует клиента, подбирает финансовые варианты и только затем передает в продажу более зрелую заявку.
+            </p>
+          </div>
+
+          <div class="flow">
+            <div class="flow-step">
+              <strong>Трафик</strong>
+              <p>Дилер запускает таргет, контекст, наружную рекламу или QR-механики и ведет клиента в App Store / Google Play.</p>
+            </div>
+            <div class="flow-step">
+              <strong>Анкета</strong>
+              <p>Клиент скачивает приложение, выбирает цель покупки и проходит короткую скоринговую анкету.</p>
+            </div>
+            <div class="flow-step">
+              <strong>Скоринг</strong>
+              <p>Система оценивает профиль клиента, предварительный риск, доход, нагрузку, взнос и параметры автомобиля.</p>
+            </div>
+            <div class="flow-step">
+              <strong>Подбор</strong>
+              <p>Приложение ранжирует банки и МФО по вероятности одобрения, платежу, длительности кредита и требованиям.</p>
+            </div>
+            <div class="flow-step">
+              <strong>Продажа</strong>
+              <p>Клиент выбирает автомобиль из каталога дилера, отправляет заявку и попадает к менеджеру с понятным контекстом.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="container split">
+          <div>
+            <div class="eyebrow">Ценность для автодилера</div>
+            <h2>Больше управляемости в кредитных продажах</h2>
+            <p class="section-copy">
+              Приложение становится отдельной воронкой: трафик, скоринг, кредитный подбор, каталог, заявка, аналитика. Дилер видит не только количество лидов, но и качество аудитории.
+            </p>
+          </div>
+          <div class="panel">
+            <ul class="check-list">
+              <li>Сокращение доли неподходящих заявок за счет предварительной оценки клиента.</li>
+              <li>Рост конверсии рекламы: пользователь сразу видит кредитные варианты и автомобили.</li>
+              <li>Собственная база клиентов, которым можно отправлять push-уведомления и новые предложения.</li>
+              <li>Продвижение приоритетных автомобилей, акций, trade-in и специальных условий.</li>
+              <li>Прозрачная аналитика по источникам трафика, скоринговым профилям и выбранным моделям.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="modules">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Состав решения</div>
+              <h2>Что входит в запуск под ключ</h2>
+            </div>
+            <p class="section-copy">
+              MVP собирается вокруг трех главных блоков: мобильное приложение для клиента, серверная логика скоринга и кабинет для управления каталогом, офферами и заявками.
+            </p>
+          </div>
+
+          <table class="feature-table">
+            <thead>
+              <tr>
+                <th>Блок</th>
+                <th>Что реализуем</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Мобильное приложение</td>
+                <td>iOS и Android, регистрация, анкета клиента, автоскоринг, подбор кредитных предложений, сравнение условий, каталог автомобилей, карточка авто, заявка, push-уведомления.</td>
+              </tr>
+              <tr>
+                <td>Скоринг и подбор</td>
+                <td>Логика оценки клиента, параметры платежеспособности, долговой нагрузки, первоначального взноса, выбранного авто, требований банков и МФО, ранжирование подходящих вариантов.</td>
+              </tr>
+              <tr>
+                <td>Каталог дилера</td>
+                <td>Марка, модель, комплектация, год, цена, первый взнос, расчет платежа, фильтры, избранное, заявки на конкретный автомобиль.</td>
+              </tr>
+              <tr>
+                <td>Кабинет управления</td>
+                <td>Заявки, статусы, карточка клиента, источник трафика, выбранные предложения, управление каталогом, настройка кредитных партнеров, базовая аналитика.</td>
+              </tr>
+              <tr>
+                <td>Публикация</td>
+                <td>Подготовка сборок, помощь с карточками App Store и Google Play, выкатка приложений на площадки, базовая настройка аналитики и событий.</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            Интеграции с банками и МФО зависят от доступности API партнеров. На первом релизе можно использовать API-интеграции, партнерские формы, маршрутизацию заявок или комбинированную схему.
+          </p>
+        </div>
+      </section>
+
+      <section id="terms">
+        <div class="container">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">Коммерческие условия</div>
+              <h2>Разработка, запуск и поддержка</h2>
+            </div>
+            <p class="section-copy">
+              Стоимость указана для комплексного запуска мобильного направления автоскоринга под бренд клиента.
+            </p>
+          </div>
+
+          <div class="price-layout">
+            <div class="price-main">
+              <span class="eyebrow">Разовый проект</span>
+              <div class="price">5-15 млн ₸</div>
+              <p>
+                Разработка и выкатка двух мобильных приложений для iOS и Android под ключ. Итоговая стоимость зависит от глубины скоринга, интеграций с банками и МФО, состава кабинета и объема каталога.
+              </p>
+              <ul class="deliverables">
+                <li>Мобильное приложение iOS</li>
+                <li>Мобильное приложение Android</li>
+                <li>White-label дизайн под бренд</li>
+                <li>Анкета и автоскоринг клиента</li>
+                <li>Подбор банков и МФО</li>
+                <li>Сравнение кредитных условий</li>
+                <li>Каталог автомобилей дилера</li>
+                <li>Кабинет заявок и управления</li>
+                <li>Базовая аналитика воронки</li>
+                <li>Публикация на площадках</li>
+              </ul>
+            </div>
+            <div class="price-side">
+              <div class="mini-price">
+                <strong>200-500 тыс. ₸ / месяц</strong>
+                <span>Поддержка после запуска: мониторинг, исправления, консультации, обновления сборок, небольшие корректировки в рамках сопровождения.</span>
+              </div>
+              <div class="mini-price">
+                <strong>Формат: под ключ</strong>
+                <span>Исполнитель берет на себя продуктовую упаковку, разработку, тестирование, релиз и техническое сопровождение мобильного направления.</span>
+              </div>
+              <div class="mini-price price-contact">
+                <strong>Обсудить условия</strong>
+                <span>Напишите в WhatsApp, чтобы согласовать формат проекта и удобное время встречи в г. Астана.</span>
+                <a
+                  class="btn whatsapp-btn compact"
+                  href="https://wa.me/77759419359?text=%D0%97%D0%B4%D1%80%D0%B0%D0%B2%D1%81%D1%82%D0%B2%D1%83%D0%B9%D1%82%D0%B5!%20%D0%9E%D0%B7%D0%BD%D0%B0%D0%BA%D0%BE%D0%BC%D0%B8%D0%BB%D1%81%D1%8F%20%D1%81%20%D0%B2%D0%B0%D1%88%D0%B8%D0%BC%20%D0%9A%D0%9F%20%D0%BF%D0%BE%20%D0%BC%D0%BE%D0%B1%D0%B8%D0%BB%D1%8C%D0%BD%D0%BE%D0%BC%D1%83%20%D0%BF%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D1%8E%20%D0%B0%D0%B2%D1%82%D0%BE%D1%81%D0%BA%D0%BE%D1%80%D0%B8%D0%BD%D0%B3%D0%B0.%20%D0%A5%D0%BE%D1%82%D0%B5%D0%BB%20%D0%B1%D1%8B%20%D0%BE%D0%B1%D1%81%D1%83%D0%B4%D0%B8%D1%82%D1%8C%20%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%20%D1%81%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D1%87%D0%B5%D1%81%D1%82%D0%B2%D0%B0%20%D0%B8%20%D0%BD%D0%B0%D0%B7%D0%BD%D0%B0%D1%87%D0%B8%D1%82%D1%8C%20%D0%B6%D0%B8%D0%B2%D1%83%D1%8E%20%D0%B2%D1%81%D1%82%D1%80%D0%B5%D1%87%D1%83%20%D0%B2%20%D0%B3.%20%D0%90%D1%81%D1%82%D0%B0%D0%BD%D0%B0."
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Связаться в WhatsApp</a>
+              </div>
+            </div>
+          </div>
+          <p class="note">
+            Не входят в стоимость: комиссии и платные сервисы третьих сторон, платные аккаунты магазинов приложений, расходы на рекламу, юридическое согласование оферт и политики обработки данных.
+          </p>
+        </div>
+      </section>
+
+      <section class="cta">
+        <div class="container cta-inner">
+          <div>
+            <h2>Следующий шаг</h2>
+            <p>
+              Обсудим условия сотрудничества, формат запуска под ваш бренд и назначим живую встречу в г. Астана.
+            </p>
+          </div>
+          <a
+            class="btn whatsapp-btn"
+            href="https://wa.me/77759419359?text=%D0%97%D0%B4%D1%80%D0%B0%D0%B2%D1%81%D1%82%D0%B2%D1%83%D0%B9%D1%82%D0%B5!%20%D0%9E%D0%B7%D0%BD%D0%B0%D0%BA%D0%BE%D0%BC%D0%B8%D0%BB%D1%81%D1%8F%20%D1%81%20%D0%B2%D0%B0%D1%88%D0%B8%D0%BC%20%D0%9A%D0%9F%20%D0%BF%D0%BE%20%D0%BC%D0%BE%D0%B1%D0%B8%D0%BB%D1%8C%D0%BD%D0%BE%D0%BC%D1%83%20%D0%BF%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D1%8E%20%D0%B0%D0%B2%D1%82%D0%BE%D1%81%D0%BA%D0%BE%D1%80%D0%B8%D0%BD%D0%B3%D0%B0.%20%D0%A5%D0%BE%D1%82%D0%B5%D0%BB%20%D0%B1%D1%8B%20%D0%BE%D0%B1%D1%81%D1%83%D0%B4%D0%B8%D1%82%D1%8C%20%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D1%8F%20%D1%81%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D1%87%D0%B5%D1%81%D1%82%D0%B2%D0%B0%20%D0%B8%20%D0%BD%D0%B0%D0%B7%D0%BD%D0%B0%D1%87%D0%B8%D1%82%D1%8C%20%D0%B6%D0%B8%D0%B2%D1%83%D1%8E%20%D0%B2%D1%81%D1%82%D1%80%D0%B5%D1%87%D1%83%20%D0%B2%20%D0%B3.%20%D0%90%D1%81%D1%82%D0%B0%D0%BD%D0%B0."
+            target="_blank"
+            rel="noopener noreferrer"
+          >Связаться в WhatsApp</a>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
