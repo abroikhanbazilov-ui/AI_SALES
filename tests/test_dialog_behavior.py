@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 import tempfile
+import types
 import unittest
 import uuid
 from datetime import datetime, timezone
@@ -514,6 +516,38 @@ class KeramoProjectTests(TempDbMixin, unittest.TestCase):
 
 
 class DialogRuntimeTests(TempDbMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_krisha_browser_launch_failure_falls_back_to_http(self) -> None:
+        payload = main.KrishaImportRequest(city="Астана", property_type="commercial")
+        settings = main.DEFAULT_SETTINGS.copy()
+        settings["krisha_use_browser"] = "true"
+        settings["krisha_headless"] = "true"
+
+        class FailingChromium:
+            async def launch(self, *, headless: bool) -> None:
+                raise RuntimeError("BrowserType.launch: Executable doesn't exist at /missing/chromium")
+
+        class FakePlaywrightContext:
+            async def __aenter__(self) -> object:
+                return types.SimpleNamespace(chromium=FailingChromium())
+
+            async def __aexit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        fake_async_api = types.ModuleType("playwright.async_api")
+        fake_async_api.async_playwright = lambda: FakePlaywrightContext()
+        fake_playwright = types.ModuleType("playwright")
+        fake_playwright.async_api = fake_async_api
+
+        with (
+            patch.dict(sys.modules, {"playwright": fake_playwright, "playwright.async_api": fake_async_api}),
+            patch.object(main, "collect_krisha_sources_httpx", AsyncMock(return_value=([{"source": "http", "text": "ok"}], []))) as http_mock,
+        ):
+            collected, errors = await main.collect_krisha_source_texts(payload, settings)
+
+        self.assertEqual(collected, [{"source": "http", "text": "ok"}])
+        self.assertTrue(any("Playwright Chromium не установлен" in error for error in errors))
+        http_mock.assert_awaited_once()
+
     async def test_auto_work_creates_campaign_for_configured_project(self) -> None:
         main.runtime_tasks["campaign"] = None
         with main.use_project(1):

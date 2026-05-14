@@ -1001,6 +1001,48 @@ python scripts/simulate_dialogs.py
 
 Текущее покрытие: `70` тестов диалоговой логики.
 
+## 32. Изменения от 2026-05-14: прод-фикс Krisha Playwright
+
+На прод-сервере `38.107.234.161` Krisha-парсер падал не на логике фильтрации, а на старте браузера:
+
+- в `event_logs` фиксировалась ошибка `BrowserType.launch: Executable doesn't exist`;
+- Playwright как Python-пакет был установлен, но Chromium не был скачан в путь, доступный systemd-сервису `holodka-bot`;
+- unit-файл сервиса не задавал `HOME` и `PLAYWRIGHT_BROWSERS_PATH`, поэтому Playwright искал браузер в `/opt/holodka-bot/.cache/ms-playwright`, где его не было.
+
+Что исправлено локально:
+
+- `collect_krisha_sources_browser(...)` в `app/main.py` теперь перехватывает ошибку старта `chromium.launch(...)`, пишет понятную ошибку в логи и возвращает ее как `source_error`, вместо того чтобы валить весь импорт исключением;
+- если браузерный режим не смог стартовать и нет блокирующей ошибки `captcha/auth/login`, `collect_krisha_source_texts(...)` по-прежнему может откатиться в HTTP-сбор источников;
+- добавлен регрессионный async-тест на сценарий отсутствующего Chromium с fallback в HTTP.
+
+Что исправлено в деплое:
+
+- `scripts/deploy_server.py` теперь создает общий путь `/opt/holodka-bot/shared/ms-playwright`;
+- во время деплоя выполняется `python -m playwright install --with-deps chromium`;
+- systemd unit `holodka-bot` теперь получает `HOME=/opt/holodka-bot` и `PLAYWRIGHT_BROWSERS_PATH=/opt/holodka-bot/shared/ms-playwright`.
+
+Что проверено после выката:
+
+- `holodka-bot` и `nginx` активны;
+- в unit-файле на сервере присутствует `PLAYWRIGHT_BROWSERS_PATH=/opt/holodka-bot/shared/ms-playwright`;
+- на сервере реально установлены каталоги `chromium-*` и `chromium_headless_shell-*` в `/opt/holodka-bot/shared/ms-playwright`;
+- прямой серверный smoke-check `playwright.chromium.launch(headless=True)` завершается успешно.
+
+Оставшееся эксплуатационное условие:
+
+- на текущем проде `krisha_login` и `krisha_password` пустые;
+- файл `/opt/holodka-bot/shared/data/krisha_storage_state.json` отсутствует;
+- значит, после починки браузера сервер больше не падает на старте Playwright, но для полноценного показа телефонов на Krisha нужен либо one-time вход в Krisha с сервера и сохранение storage state, либо заполнение логина/пароля Krisha в настройках.
+
+Проверки:
+
+```bash
+python -m py_compile app/main.py tests/test_dialog_behavior.py scripts/deploy_server.py
+python -m unittest tests.test_dialog_behavior
+```
+
+Текущее покрытие: `82` теста.
+
 
 
 ## Авторабота по проектам

@@ -1995,7 +1995,22 @@ async def collect_krisha_sources_browser(
     async with async_playwright() as p:
         headless = is_truthy(settings.get("krisha_headless"))
         krisha_log("Запускаю браузер Krisha", payload={"headless": headless, "search_urls": search_urls, "max_pages": payload.max_pages})
-        browser = await p.chromium.launch(headless=headless)
+        try:
+            browser = await p.chromium.launch(headless=headless)
+        except Exception as exc:
+            error_text = str(exc)
+            if "executable doesn't exist" in error_text.lower():
+                error_text = (
+                    "Playwright Chromium не установлен. "
+                    "Установите браузер: python -m playwright install --with-deps chromium"
+                )
+            errors.append(f"browser: {error_text}")
+            krisha_log(
+                f"Не удалось запустить браузер Krisha: {error_text}",
+                level="error",
+                payload={"headless": headless, "search_urls": search_urls},
+            )
+            return collected, errors
         context_kwargs: dict[str, Any] = {
             "locale": "ru-RU",
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
