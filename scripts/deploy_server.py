@@ -11,6 +11,8 @@ from pathlib import Path
 
 import paramiko
 
+from ssh_utils import SSH_RETRYABLE_ERRORS, connect_ssh_with_retry
+
 
 EXCLUDED_PARTS = {
     ".git",
@@ -80,10 +82,43 @@ def build_archive(source_dir: Path) -> Path:
 
 
 def connect_ssh(host: str, user: str, password: str, port: int) -> paramiko.SSHClient:
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(hostname=host, username=user, password=password, port=port, look_for_keys=False, allow_agent=False, timeout=30)
-    return client
+    return connect_ssh_with_retry(
+        hostname=host,
+        username=user,
+        password=password,
+        port=port,
+    )
+
+
+def run_step_with_client(
+    host: str,
+    user: str,
+    password: str,
+    port: int,
+    action: Any,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 5.0,
+) -> None:
+    for attempt in range(1, attempts + 1):
+        client = None
+        try:
+            client = connect_ssh(host, user, password, port)
+            action(client)
+            return
+        except (paramiko.AuthenticationException, paramiko.BadHostKeyException):
+            raise
+        except (RuntimeError, *SSH_RETRYABLE_ERRORS) as exc:
+            if attempt == attempts:
+                raise
+            print(
+                f"Step failed on attempt {attempt}/{attempts}: {exc}. Retrying in {delay_seconds:.0f}s...",
+                file=sys.stderr,
+            )
+            time.sleep(delay_seconds)
+        finally:
+            if client is not None:
+                client.close()
 
 
 def run_remote(client: paramiko.SSHClient, command: str) -> str:
@@ -173,8 +208,14 @@ def provision_remote(client: paramiko.SSHClient) -> None:
     print("[1/6] Installing system packages...")
     run_remote(
         client,
-        "export DEBIAN_FRONTEND=noninteractive && apt-get update && "
-        "apt-get install -y python3 python3-venv python3-pip nginx ufw ca-certificates",
+        "export DEBIAN_FRONTEND=noninteractive && "
+        "for attempt in 1 2 3; do "
+        "apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && "
+        "apt-get install -y -o DPkg::Lock::Timeout=60 python3 python3-venv python3-pip nginx ufw ca-certificates && exit 0; "
+        "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; "
+        "echo \"apt-get attempt $attempt failed; retrying...\" >&2; "
+        "sleep 5; "
+        "done",
     )
     print("[2/6] Creating app directories and service user...")
     run_remote(
@@ -252,24 +293,31 @@ def main() -> int:
 
     print("Building deployment archive...")
     archive_path = build_archive(source_dir)
-    client = None
     try:
         print(f"Connecting to {args.user}@{args.host}:{args.port}...")
-        client = connect_ssh(args.host, args.user, args.password, args.port)
-        provision_remote(client)
+        run_step_with_client(args.host, args.user, args.password, args.port, provision_remote)
         print("Uploading project archive...")
-        upload_file(client, archive_path, REMOTE_ARCHIVE)
-        deploy_archive(client)
-        configure_app(client)
-        verify_remote(client, args.host)
+        run_step_with_client(
+            args.host,
+            args.user,
+            args.password,
+            args.port,
+            lambda client: upload_file(client, archive_path, REMOTE_ARCHIVE),
+        )
+        run_step_with_client(args.host, args.user, args.password, args.port, deploy_archive)
+        run_step_with_client(args.host, args.user, args.password, args.port, configure_app)
+        run_step_with_client(
+            args.host,
+            args.user,
+            args.password,
+            args.port,
+            lambda client: verify_remote(client, args.host),
+        )
         print(f"Deployment completed. Open http://{args.host}/login")
         return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    finally:
-        if client is not None:
-            client.close()
 
 
 if __name__ == "__main__":

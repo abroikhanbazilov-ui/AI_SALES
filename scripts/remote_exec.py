@@ -5,7 +5,7 @@ import os
 import shlex
 import sys
 
-import paramiko
+from ssh_utils import connect_ssh_with_retry
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,17 +26,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        client.connect(
+        client = connect_ssh_with_retry(
             hostname=args.host,
             username=args.user,
             password=args.password,
             port=args.port,
-            look_for_keys=False,
-            allow_agent=False,
-            timeout=30,
         )
         command = " ".join(args.command)
         stdin, stdout, stderr = client.exec_command(f"bash -lc {shlex.quote(command)}")
@@ -49,7 +45,8 @@ def main() -> int:
             print(error, end="", file=sys.stderr)
         return exit_code
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 if __name__ == "__main__":

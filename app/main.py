@@ -13,12 +13,15 @@ import os
 import random
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
+import time
 import uuid
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -42,16 +45,18 @@ DEFAULT_PROJECT_ID = 1
 KERAMO_PROJECT_ID = 2
 KERAMO_WORKFLOW_TYPE = "keramo_investor"
 KERAMO_PROPOSAL_FILENAME = "KERAMO_BUILD_INVEST_PROPOSAL.html"
-SECOND_PROJECT_AI_PROMPT = """Ты B2B sales assistant в WhatsApp для проекта KERAMO BUILD. Оффер: инвестиция в производство, нарезку и монтаж керамогранита в Астане. Сумма инвестиций 35 млн тенге, базовый срок возврата 25 месяцев, после возврата инвестор получает 30% прибыли. Цель диалога: коротко и без давления понять, интересна ли человеку инвестиционная возможность, является ли он собственником/инвестором или кто принимает такие решения, и довести до следующего шага: КП, созвон, встреча или ручная передача.
+ASTANA_TIMEZONE = "Asia/Almaty"
+SECOND_PROJECT_AI_PROMPT = """Ты B2B sales assistant в WhatsApp для проекта KERAMO BUILD. Оффер: инвестиция в производство, нарезку и монтаж керамогранита в Астане. Сумма сделки 35 млн тенге; по базовому плану возврат капитала 25 месяцев, затем инвестор получает 30% прибыли. Цель диалога: коротко понять, уместно ли человеку обсуждать такие инвестиции, кто это смотрит, и довести до следующего шага: КП, короткий созвон, встреча или ручная передача.
 
-Стиль: живой B2B-мессенджер, 1-2 коротких предложения, один вопрос за сообщение. Не обещай гарантированную доходность, прибыль без риска или юридическую защиту без оговорок. Говори через базовый сценарий, прогноз и условия сделки. Не используй термин «ЛПР» в сообщениях клиенту; пиши «собственник», «инвестор», «руководитель» или «тот, кто смотрит инвестиционные вопросы». Не используй шаблонные завершающие фразы вроде «если захотите вернуться к вопросу» или «я на связи».
+Стиль: живой B2B-мессенджер, 1-2 коротких предложения, один вопрос за сообщение, без давления и без длинных офферов. Не обещай гарантированную доходность, прибыль без риска или юридическую защиту без оговорок. Говори как про сценарий и условия сделки, а не как про гарантированный результат. Не используй термин «ЛПР» в сообщениях клиенту; пиши «собственник», «инвестор», «руководитель» или «тот, кто смотрит инвестиционные вопросы». Не используй шаблонные завершающие фразы вроде «если захотите вернуться к вопросу» или «я на связи».
 
 Правила поведения:
 - Используй research-first и permission-based selling: если есть сигнал по коммерческой недвижимости, собственнику помещения или аренде, аккуратно свяжи его с инвестиционной темой.
 - В первом контакте не отправляй длинный оффер. Сначала спроси, уместно ли коротко написать по инвестиционному предложению.
-- Если собеседник заинтересован, задай один квалифицирующий вопрос: комфортен ли чек 35 млн тенге, интересна ли доля в операционном бизнесе или удобнее созвон.
-- Если собеседник просит подробнее, дай короткую суть: производство керамогранита, 35 млн тенге, возврат по базовому плану 25 месяцев, затем 30% прибыли; добавь, что фактические результаты зависят от рынка.
-- Если контакт ответственного уже передали, начни короткий диалог с ним и только после этого предлагай КП, созвон или встречу.
+- Если собеседник проявил интерес или попросил подробнее, коротко объясни суть и предложи один следующий шаг: отправить короткое КП сюда в WhatsApp или перейти к короткому созвону.
+- Не уводи разговор в лишнюю квалификацию до отправки КП: не начинай с вопросов про комфорт чека, бюджет или глубину интереса, если человек еще не видел материалы.
+- Если контакт ответственного уже передали, начни короткий диалог с ним и только после этого предлагай КП или короткий созвон.
+- Если клиент просит подробнее после КП, кратко отвечай по сути и веди к созвону или встрече.
 
 Возвращай только JSON:
 {"reply":"текст ответа","stage":"ask_lpr|need_lpr_name|lpr_self|send_proposal|interested|handoff|stop|continue","send_proposal":false,"is_lpr":false,"interested":false,"lpr_phone":"","lpr_name":"","stop":false}
@@ -74,6 +79,10 @@ runtime_tasks: dict[str, asyncio.Task | None] = {
     "krisha_parser": None,
     "auto_work": None,
 }
+campaign_tasks: dict[int, asyncio.Task] = {}
+poller_tasks: dict[int, asyncio.Task] = {}
+ai_sync_tasks: dict[int, asyncio.Task] = {}
+ai_states: dict[int, dict[str, Any]] = {}
 
 runtime_state: dict[str, dict[str, Any]] = {
     "check": {"status": "idle", "processed": 0, "total": 0, "last_error": None},
@@ -131,13 +140,15 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "handoff_phone": "77759419359, 77015001995",
     "auto_campaign_enabled": "false",
     "auto_campaign_time": "10:00",
-    "auto_campaign_timezone": "Asia/Qyzylorda",
+    "auto_campaign_timezone": ASTANA_TIMEZONE,
     "auto_campaign_max_messages": "25",
     "auto_campaign_delay_min_seconds": "40",
     "auto_campaign_delay_max_seconds": "120",
     "auto_campaign_target_kind": "lead",
     "auto_campaign_last_run_date": "",
     "auto_campaign_last_wait_date": "",
+    "auto_campaign_last_error_date": "",
+    "auto_campaign_last_error": "",
     "ai_system_prompt": "",
     "current_project_id": str(DEFAULT_PROJECT_ID),
     "krisha_login": "",
@@ -153,7 +164,13 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "krisha_max_contacts": "",
     "krisha_interval_minutes": "120",
     "krisha_use_browser": "true",
+    "krisha_browser_engine": "selenium_undetected",
     "krisha_headless": "true",
+    "krisha_chrome_executable_path": "",
+    "krisha_proxy_server": "",
+    "krisha_proxy_username": "",
+    "krisha_proxy_password": "",
+    "krisha_proxy_bypass": "",
 }
 
 PROJECT_SETTING_KEYS = {"proposal_filename", "ai_system_prompt"}
@@ -254,6 +271,7 @@ EMAIL_REQUEST_RE = re.compile(
 )
 PROPOSAL_REQUEST_RE = re.compile(
     r"\b(пришлите|отправьте|скиньте|направьте|прикрепите|"
+    r"отправте|отпроавьте|отпра(?:вь|вьте)|скинте|"
     r"отправля(?:й|йте)|присыла(?:й|йте)|скидыва(?:й|йте)|направля(?:й|йте)|прикрепля(?:й|йте)|"
     r"жду|давайте|можно).{0,30}(кп|коммерческ\w*|предложени\w*)"
     r"|\b(кп|коммерческ\w*\s+предложени\w*)\b",
@@ -262,7 +280,14 @@ PROPOSAL_REQUEST_RE = re.compile(
 PROPOSAL_CONSENT_RE = re.compile(
     r"^\s*(да|давайте|ок(?:ей)?|хорошо|конечно|можно|жду|принял(?:а)?|принято|"
     r"пришлите(?:\s+сюда)?|отправьте(?:\s+сюда)?|скиньте(?:\s+сюда)?|направьте(?:\s+сюда)?|прикрепите(?:\s+сюда)?|"
+    r"отправте(?:\s+сюда)?|отпроавьте(?:\s+сюда)?|отпра(?:вь|вьте)(?:\s+сюда)?|скинте(?:\s+сюда)?|"
     r"отправля(?:й|йте)|присыла(?:й|йте)|скидыва(?:й|йте)|направля(?:й|йте)|прикрепля(?:й|йте))\b",
+    re.IGNORECASE,
+)
+PROPOSAL_OFFER_PENDING_RE = re.compile(
+    r"\b(?:пришлю|могу\s+(?:отправить|прислать)|лучше\s+сначала\s+отправить|"
+    r"отправить|прислать|скинуть|прикрепить)\b.{0,90}\b(кп|коммерческ\w*|предложени\w*)\b"
+    r"|\b(?:кп|коммерческ\w*|предложени\w*)\b.{0,80}\?",
     re.IGNORECASE,
 )
 WARMUP_DECLINE_RE = re.compile(
@@ -282,6 +307,11 @@ WARMUP_AUTOCREDIT_NO_RE = re.compile(
 CONFUSION_RE = re.compile(
     r"\b(не\s+понял(?:а)?|не\s+совсем\s+понял(?:а)?|что\s+это|о\s+чем\s+речь|"
     r"в\s+чем\s+смысл|в\s+чем\s+вопрос|не\s+уловил(?:а)?|не\s+ясно)\b",
+    re.IGNORECASE,
+)
+SHORT_TOPIC_CLARIFICATION_RE = re.compile(
+    r"^\s*(?:авто|машин[аы]?|автокредит|кредит|в\s+кредит|какой\s+кредит|какие\s+кредиты|"
+    r"қандай\s+кр[еe]?дит\w*|қандай\s+кр[дd]ит\w*)\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
 DETAIL_REQUEST_RE = re.compile(
@@ -319,9 +349,34 @@ REQUEST_OUR_CONTACT_RE = re.compile(
     r"\bс\s+вами\s+свяж\w+\b|\bменеджер\s+(?:сам\s+)?с\s+вами\s+свяж\w+\b",
     re.IGNORECASE,
 )
+LIVE_CALLBACK_REQUEST_RE = re.compile(
+    r"\b(?:пусть|пускай|можете|можно|хочу|надо|нужно)\b.{0,90}\b(?:позвон\w*|перезвон\w*|наб[её]р\w*|свяж\w+)\b|"
+    r"\b(?:живой\s+человек|человек|менеджер|специалист|коллега)\b.{0,90}\b(?:позвон\w*|перезвон\w*|наб[её]р\w*|свяж\w+)\b|"
+    r"\b(?:позвоните|перезвоните|наберите|свяжитесь)\b",
+    re.IGNORECASE,
+)
+CALLBACK_TIME_RE = re.compile(
+    r"\b(сегодня|завтра|послезавтра|после\s+обеда|до\s+обеда|утром|днем|дн[её]м|вечером|"
+    r"\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:час(?:а|ов)?|ч))\b",
+    re.IGNORECASE,
+)
+BUSINESS_CLOSED_RE = re.compile(
+    r"\b(?:проект|направлени\w*|бизнес|отдел)\b.{0,40}\b(?:закрыт\w*|закрыли|приостановил\w*|остановил\w*)\b|"
+    r"\b(?:закрыли|закрыт\w*|приостановил\w*|остановил\w*)\b.{0,40}\b(?:проект|направлени\w*|бизнес|отдел)\b|"
+    r"\b(?:не\s+работа(?:ем|ет|ют)|больше\s+не\s+работа(?:ем|ет|ют)|пока\s+не\s+работа(?:ем|ет|ют))\b",
+    re.IGNORECASE,
+)
+CUSTOM_DEVELOPMENT_RE = re.compile(
+    r"\b(?:друго[ей]|сво[её]|отдельн\w*|кастомн\w*|индивидуальн\w*)\b.{0,100}\b(?:приложени\w*|сервис\w*|систем\w*|разработ\w*|сдела(?:ть|ете|ете))\b|"
+    r"\b(?:сможете|можете|реально)\b.{0,90}\b(?:сделать|разработать|доработать|собрать)\b",
+    re.IGNORECASE,
+)
+AMBIGUOUS_REACTION_RE = re.compile(r"^\s*(оу|ого|ясно|понятно|хм+|мм+|а+)\s*[!.]*\s*$", re.IGNORECASE)
+LINK_OR_EMPTY_NOISE_RE = re.compile(r"^\s*$|https?://|chat\.whatsapp\.com|instagram\.com|t\.me/", re.IGNORECASE)
 SPECIALIST_CONTACT_OFFER_RE = re.compile(
     r"\b(?:могу|можем)\b.{0,90}\b(?:предоставить|дать|отправить|скинуть|направить)\b.{0,90}\b(?:контакт\w*|контактн\w*\s+данн\w*|номер|специалист\w*)\b|"
-    r"\b(?:если|если\s+вам)\b.{0,80}\b(?:связаться|обсудить)\b.{0,80}\b(?:специалист\w*|ответственн\w*|менеджер\w*)\b",
+    r"\b(?:если|если\s+вам)\b.{0,80}\b(?:связаться|обсудить)\b.{0,80}\b(?:специалист\w*|ответственн\w*|менеджер\w*)\b|"
+    r"\b(?:дам|дать|скину|пришлю|могу\s+дать|могу\s+скинуть)\b.{0,80}\b(?:номер|контакт|whatsapp|вотсап|человека|того,\s*кто|кто\s+прода[её]т|кто\s+занимается)\b",
     re.IGNORECASE,
 )
 CANNOT_ACCEPT_PROPOSAL_RE = re.compile(
@@ -337,13 +392,26 @@ FORWARD_TO_RESPONSIBLE_RE = re.compile(
     re.IGNORECASE,
 )
 ACTION_REQUEST_RE = re.compile(
-    r"\b(что\s+(?:требуется|нужно|именно\s+нужно)\s+от\s+меня|что\s+вам\s+нужно|что\s+от\s+меня\s+нужно|что\s+требуется)\b",
+    r"\b(что\s+(?:требуется|нужно|именно\s+нужно|надо)\s+от\s+меня|что\s+вам\s+(?:нужно|надо)|"
+    r"что\s+от\s+меня\s+(?:нужно|надо)|что\s+(?:требуется|надо)|что\s+именно\s+(?:нужно|надо)|зачем\s+пиш(?:ете|ешь))\b",
+    re.IGNORECASE,
+)
+HAS_RESPONSIBLE_SHORT_RE = re.compile(
+    r"^\s*(?:да\s+)?(?:есть|бар)(?:\s+(?:да|и[әе]))?\s*[!.]*\s*$",
     re.IGNORECASE,
 )
 BUYER_CONFUSION_RE = re.compile(
     r"\b(вы\s+хотите\s+получить\s+автокредит(?:ование)?|вам\s+нужен\s+автокредит(?:ование)?|"
     r"хотите\s+оформить\s+автокредит(?:ование)?|хотите\s+получить\s+кредит|оформить\s+кредит|"
+    r"(?:мне|нам)\s+не\s+нуж(?:ен|на|ны)\s+(?:авто)?кредит(?:ование)?|не\s+нуж(?:ен|на|ны)\s+(?:авто)?кредит(?:ование)?|"
+    r"(?:мы|я|у\s+нас)\s+не\s+кредитн\w*\s+организац\w*|"
     r"какую\s+(?:машину|модель|авто)\s+(?:хотели|ищете|подбираете)|какая\s+модель\s+вам\s+интересна)\b",
+    re.IGNORECASE,
+)
+RETAIL_CUSTOMER_REPLY_RE = re.compile(
+    r"\b(камри|camry|королла|corolla|солярис|solaris|соната|sonata|elantra|элантра|"
+    r"kia|hyundai|toyota|lexus|bmw|mercedes|audi|rav4|prado|land\s+cruiser|"
+    r"машин\w*|модель|год|жыл|рассрочк\w*)\b",
     re.IGNORECASE,
 )
 LANGUAGE_PROMPT_RE = re.compile(
@@ -394,7 +462,7 @@ ALREADY_HAVE_RE = re.compile(
     re.IGNORECASE,
 )
 SELF_LPR_RE = re.compile(
-    r"\b(я\s+(?:и\s+есть\s+)?лпр|сам\s+лпр|лпр\s+это\s+я|это\s+я|"
+    r"\b(я\s+(?:и\s+есть\s+)?лпр|сам\s+лпр|лпр\s+это\s+я|это\s+я|это\s+ко\s+мне|"
     r"я\s+(?:сам\s+)?(?:решаю|принимаю|директор|руководител\w*|собственник|владелец|учредител\w*|занимаюсь|отвечаю)|"
     r"я\s+(?:сам\s+)?(?:этим|этим\s+вопросом|этим\s+направлением)\s+(?:занимаюсь|отвечаю)|"
     r"(?:этим|этим\s+вопросом|этим\s+направлением)\s+(?:занимаюсь|отвечаю)\s+я|"
@@ -423,6 +491,7 @@ NEGATIVE_INTEREST_RE = re.compile(
 )
 LPR_ACTIVE_STATUSES = {"lpr_self", "lpr_ready", "lpr_needs_name"}
 KRISHA_ALLOWED_HOST_RE = re.compile(r"(^|\.)krisha\.kz$", re.IGNORECASE)
+KRISHA_SESSION_ALLOWED_HOST_RE = re.compile(r"(^|\.)(?:krisha\.kz|kolesa\.kz)$", re.IGNORECASE)
 KRISHA_LISTING_URL_RE = re.compile(r"https?://(?:www\.)?krisha\.kz/[^\s\"'<>]+|/(?:a/show|prodazha|arenda)/[^\s\"'<>]+", re.IGNORECASE)
 KRISHA_DETAIL_URL_RE = re.compile(r"(?:https?://(?:www\.)?krisha\.kz)?/a/show/\d+", re.IGNORECASE)
 KRISHA_CITY_SLUGS = {
@@ -544,7 +613,13 @@ class SettingsPayload(BaseModel):
     krisha_max_contacts: str | None = None
     krisha_interval_minutes: str | None = None
     krisha_use_browser: str | None = None
+    krisha_browser_engine: str | None = None
     krisha_headless: str | None = None
+    krisha_chrome_executable_path: str | None = None
+    krisha_proxy_server: str | None = None
+    krisha_proxy_username: str | None = None
+    krisha_proxy_password: str | None = None
+    krisha_proxy_bypass: str | None = None
 
 
 class CampaignStart(BaseModel):
@@ -995,6 +1070,47 @@ def current_project_id() -> int:
         return DEFAULT_PROJECT_ID
 
 
+def selected_project_id() -> int:
+    try:
+        return int(get_setting("current_project_id", str(DEFAULT_PROJECT_ID)) or DEFAULT_PROJECT_ID)
+    except ValueError:
+        return DEFAULT_PROJECT_ID
+
+
+def default_ai_state(project_id: int) -> dict[str, Any]:
+    return {"status": "idle", "processed": 0, "last_error": None, "project_id": int(project_id)}
+
+
+def set_ai_state(project_id: int, **updates: Any) -> dict[str, Any]:
+    resolved_project_id = int(project_id)
+    state = ai_states.setdefault(resolved_project_id, default_ai_state(resolved_project_id))
+    state.update(updates)
+    state["project_id"] = resolved_project_id
+    if selected_project_id() == resolved_project_id:
+        runtime_state["ai"] = dict(state)
+    return state
+
+
+def ai_runtime_for_project(project_id: int) -> dict[str, Any]:
+    resolved_project_id = int(project_id)
+    state = dict(ai_states.get(resolved_project_id) or default_ai_state(resolved_project_id))
+    poller = poller_tasks.get(resolved_project_id)
+    sync_task = ai_sync_tasks.get(resolved_project_id)
+    poller_running = bool(poller and not poller.done())
+    sync_running = bool(sync_task and not sync_task.done())
+    if sync_running:
+        state["status"] = "history_sync"
+    elif poller_running and state.get("status") in {"idle", "stopped"}:
+        state["status"] = "running"
+    elif not poller_running and not sync_running and not is_truthy(get_settings(resolved_project_id).get("ai_enabled")):
+        state["status"] = "stopped"
+    state["poller_running"] = poller_running
+    state["history_sync_running"] = sync_running
+    state["enabled"] = is_truthy(get_settings(resolved_project_id).get("ai_enabled"))
+    state["project_id"] = resolved_project_id
+    return state
+
+
 @contextmanager
 def use_project(project_id: int) -> Iterator[None]:
     token = project_context_id.set(int(project_id))
@@ -1299,6 +1415,57 @@ def is_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
+def krisha_should_run_headless(settings: dict[str, str]) -> bool:
+    if is_truthy(settings.get("krisha_headless")):
+        return True
+    if os.name != "nt" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    return False
+
+
+def krisha_browser_engine(settings: dict[str, str]) -> str:
+    raw = safe_cell(settings.get("krisha_browser_engine")).lower().replace("-", "_")
+    if raw in {"selenium", "undetected", "undetected_chromedriver", "selenium_uc", "selenium_undetected", "v2"}:
+        return "selenium_undetected"
+    return "playwright"
+
+
+def krisha_browser_proxy_settings(settings: dict[str, str]) -> dict[str, str] | None:
+    server = safe_cell(settings.get("krisha_proxy_server"))
+    if not server:
+        return None
+    proxy: dict[str, str] = {"server": server}
+    username = safe_cell(settings.get("krisha_proxy_username"))
+    password = safe_cell(settings.get("krisha_proxy_password"))
+    bypass = safe_cell(settings.get("krisha_proxy_bypass"))
+    if username:
+        proxy["username"] = username
+    if password:
+        proxy["password"] = password
+    if bypass:
+        proxy["bypass"] = bypass
+    return proxy
+
+
+def krisha_httpx_proxy_url(proxy_settings: dict[str, str] | None) -> str | None:
+    if not proxy_settings:
+        return None
+    server = safe_cell(proxy_settings.get("server"))
+    if not server:
+        return None
+    username = safe_cell(proxy_settings.get("username"))
+    password = safe_cell(proxy_settings.get("password"))
+    if not username and not password:
+        return server
+    parsed = urlparse(server)
+    if "@" in parsed.netloc:
+        return server
+    userinfo = quote(username or "", safe="")
+    if password:
+        userinfo = f"{userinfo}:{quote(password, safe='')}"
+    return urlunparse(parsed._replace(netloc=f"{userinfo}@{parsed.netloc}"))
+
+
 def optional_float(value: Any) -> float | None:
     raw = safe_cell(value)
     if not raw:
@@ -1507,10 +1674,17 @@ def krisha_detail_urls_from_text(raw: str, limit: int = 120) -> list[str]:
     return urls
 
 
+def krisha_detail_url_limit(payload: KrishaImportRequest) -> int:
+    if not payload.max_contacts:
+        return 80
+    return min(80, max(10, int(payload.max_contacts) * 2))
+
+
 def is_captcha_page(text: str) -> bool:
     lowered = (text or "").lower()
+    normalized = re.sub(r"[\s\xa0]+", " ", html.unescape(text or "").lower())
     return any(
-        token in lowered
+        token in lowered or token in normalized
         for token in (
             "captcha-page",
             "form-captcha",
@@ -1518,10 +1692,42 @@ def is_captcha_page(text: str) -> bool:
             "подтвердите, что вы не робот",
             "подтвердите что вы не робот",
             "проверка безопасности",
+            "чтобы увидеть номер телефона",
+            "a-phones__recaptcha",
+            "я не робот",
             "are you a human",
             "i am not a robot",
         )
     )
+
+
+KRISHA_LOGIN_ERROR_TOKENS = (
+    "неверно указан логин или пароль",
+    "неверный логин или пароль",
+    "неверный пароль",
+    "incorrect login or password",
+    "wrong login or password",
+)
+KRISHA_LOGIN_INTERACTION_TIMEOUT_MS = 15_000
+
+
+def krisha_login_credentials_rejected(text: str) -> bool:
+    normalized = re.sub(r"[\s\xa0]+", " ", html.unescape(text or "").lower())
+    return any(token in normalized for token in KRISHA_LOGIN_ERROR_TOKENS)
+
+
+KRISHA_EMPTY_SEARCH_TOKENS = (
+    "ничего не найдено",
+    "по вашему запросу ничего не найдено",
+    "объявлений не найдено",
+    "объявление не найдено",
+    "предложений не найдено",
+)
+
+
+def krisha_search_page_has_empty_results(text: str) -> bool:
+    normalized = re.sub(r"[\s\xa0]+", " ", html.unescape(text or "").lower())
+    return any(token in normalized for token in KRISHA_EMPTY_SEARCH_TOKENS)
 
 
 def krisha_page_url(url: str, page: int) -> str:
@@ -1531,6 +1737,29 @@ def krisha_page_url(url: str, page: int) -> str:
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["page"] = str(page)
     return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+async def krisha_wait_for_search_results(
+    page: Any,
+    payload: KrishaImportRequest,
+    *,
+    timeout_ms: int = 12_000,
+) -> tuple[str, list[str], bool]:
+    attempts = max(1, timeout_ms // 1000)
+    last_content = ""
+    detail_limit = krisha_detail_url_limit(payload)
+    for attempt in range(attempts):
+        last_content = await krisha_page_content(page, attempts=2, wait_ms=400) or ""
+        detail_urls = krisha_detail_urls_from_text(last_content, limit=detail_limit)
+        if detail_urls:
+            return last_content, detail_urls, False
+        if is_captcha_page(last_content):
+            return last_content, [], False
+        if krisha_search_page_has_empty_results(last_content):
+            return last_content, [], True
+        if attempt + 1 < attempts:
+            await page.wait_for_timeout(1000)
+    return last_content, [], False
 
 
 def first_number_from_text(text: str, suffix_pattern: str) -> float | None:
@@ -1592,6 +1821,81 @@ def nearest_krisha_url(raw: str, snippet: str) -> str | None:
 def krisha_property_tokens(payload: KrishaImportRequest) -> list[str]:
     property_key = (payload.property_type or "").strip().lower()
     return KRISHA_PROPERTY_TYPES.get(property_key, [])
+
+
+def krisha_storage_state_host_allowed(host: str | None) -> bool:
+    normalized = safe_cell(host).lower().lstrip(".")
+    return bool(normalized and KRISHA_SESSION_ALLOWED_HOST_RE.search(normalized))
+
+
+def krisha_sanitized_storage_state(storage_state_path: Path) -> dict[str, Any] | None:
+    try:
+        raw_state = json.loads(storage_state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        krisha_log(
+            "Не удалось прочитать сохраненную сессию Krisha, запускаю браузер без storage state",
+            level="warning",
+            payload={"storage_state": str(storage_state_path), "error": str(exc)},
+        )
+        return None
+    if not isinstance(raw_state, dict):
+        krisha_log(
+            "Формат сохраненной сессии Krisha некорректен, запускаю браузер без storage state",
+            level="warning",
+            payload={"storage_state": str(storage_state_path), "type": type(raw_state).__name__},
+        )
+        return None
+
+    raw_cookies = raw_state.get("cookies") if isinstance(raw_state.get("cookies"), list) else []
+    raw_origins = raw_state.get("origins") if isinstance(raw_state.get("origins"), list) else []
+    filtered_cookies = [
+        item
+        for item in raw_cookies
+        if isinstance(item, dict) and krisha_storage_state_host_allowed(item.get("domain"))
+    ]
+    filtered_origins: list[dict[str, Any]] = []
+    for item in raw_origins:
+        if not isinstance(item, dict):
+            continue
+        origin = safe_cell(item.get("origin"))
+        host = urlparse(origin).hostname or ""
+        if not krisha_storage_state_host_allowed(host):
+            continue
+        local_storage = item.get("localStorage") if isinstance(item.get("localStorage"), list) else []
+        filtered_origins.append(
+            {
+                "origin": origin,
+                "localStorage": [
+                    entry
+                    for entry in local_storage
+                    if isinstance(entry, dict) and "name" in entry and "value" in entry
+                ],
+            }
+        )
+
+    removed_cookies = len(raw_cookies) - len(filtered_cookies)
+    removed_origins = len(raw_origins) - len(filtered_origins)
+    if removed_cookies or removed_origins:
+        krisha_log(
+            "Сохраненная сессия Krisha очищена от сторонних доменов перед запуском браузера",
+            payload={
+                "storage_state": str(storage_state_path),
+                "cookies_kept": len(filtered_cookies),
+                "cookies_removed": removed_cookies,
+                "origins_kept": len(filtered_origins),
+                "origins_removed": removed_origins,
+            },
+        )
+
+    sanitized_state = {"cookies": filtered_cookies, "origins": filtered_origins}
+    if not filtered_cookies and not filtered_origins:
+        krisha_log(
+            "В сохраненной сессии Krisha не осталось подходящих krisha/kolesa domains",
+            level="warning",
+            payload={"storage_state": str(storage_state_path)},
+        )
+        return None
+    return sanitized_state
 
 
 def krisha_keyword_tokens(payload: KrishaImportRequest) -> list[str]:
@@ -1722,7 +2026,7 @@ async def collect_krisha_sources_httpx(payload: KrishaImportRequest, urls: list[
                     collected.append({"source": page_url, "text": response.text})
                     if krisha_collection_target_reached(payload, collected):
                         return collected, errors
-                    for detail_url in krisha_detail_urls_from_text(response.text):
+                    for detail_url in krisha_detail_urls_from_text(response.text, limit=krisha_detail_url_limit(payload)):
                         if detail_url in seen_details:
                             continue
                         seen_details.add(detail_url)
@@ -1747,8 +2051,152 @@ async def krisha_browser_auth_prompt_visible(page: Any) -> bool:
     return bool(await page.locator(".auth-modal, input[type='password']").count())
 
 
+def krisha_content_navigation_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "unable to retrieve content" in text and ("navigating" in text or "changing the content" in text)
+
+
+async def krisha_page_content(page: Any, *, attempts: int = 4, wait_ms: int = 700) -> str | None:
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return await page.content()
+        except Exception as exc:
+            if not krisha_content_navigation_error(exc):
+                raise
+            last_error = exc
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5_000)
+            except Exception:
+                pass
+            try:
+                await page.wait_for_timeout(wait_ms)
+            except Exception:
+                pass
+    krisha_log(
+        "Не удалось прочитать HTML Krisha во время перехода страницы",
+        level="warning",
+        payload={"url": getattr(page, "url", ""), "error": str(last_error or "")},
+    )
+    return None
+
+
+async def krisha_page_visible_text(page: Any) -> str:
+    try:
+        body = page.locator("body").first
+        text = await body.inner_text(timeout=1500)
+        if text:
+            return str(text)
+    except Exception:
+        pass
+    try:
+        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        return str(text or "")
+    except Exception:
+        return ""
+
+
+async def krisha_page_phone_artifacts(page: Any) -> str:
+    try:
+        return str(
+            await page.evaluate(
+                """
+                () => {
+                    const selectors = [
+                        "a[href^='tel:']",
+                        "a[href*='tel:']",
+                        "[data-phone]",
+                        "[data-number]",
+                        "[data-testid*='phone']",
+                        ".a-phones",
+                        ".show-phones",
+                        ".offer__contacts",
+                        ".contacts"
+                    ];
+                    const values = [];
+                    const add = (value) => {
+                        const text = String(value || '').replace(/\\s+/g, ' ').trim();
+                        if (text && !values.includes(text)) values.push(text);
+                    };
+                    for (const selector of selectors) {
+                        for (const el of Array.from(document.querySelectorAll(selector)).slice(0, 30)) {
+                            add(el.textContent);
+                            for (const attr of ['href', 'data-phone', 'data-number', 'data-testid', 'aria-label', 'title']) {
+                                add(el.getAttribute(attr));
+                            }
+                        }
+                    }
+                    return values.join('\\n');
+                }
+                """
+            )
+        )
+    except Exception:
+        return ""
+
+
+async def krisha_captcha_widget_visible(page: Any) -> bool:
+    try:
+        return bool(
+            await page.evaluate(
+                """
+                () => {
+                    const visible = (el) => Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                    const selectors = [
+                        '.a-phones__recaptcha',
+                        '.captcha-page',
+                        '.form-captcha',
+                        "iframe[src*='recaptcha/api2/anchor']",
+                        "iframe[src*='recaptcha/api2/bframe']"
+                    ];
+                    return selectors.some((selector) => Array.from(document.querySelectorAll(selector)).some(visible));
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+async def krisha_detail_snapshot(page: Any, *, attempts: int = 2, wait_ms: int = 300) -> str:
+    content = await krisha_page_content(page, attempts=attempts, wait_ms=wait_ms) or ""
+    visible_text = await krisha_page_visible_text(page)
+    artifacts = await krisha_page_phone_artifacts(page)
+    return "\n".join(part for part in (content, visible_text, artifacts) if part)
+
+
+async def krisha_wait_for_phone_reveal(
+    page: Any,
+    payload: KrishaImportRequest,
+    default_country_code: str,
+    detail_url: str,
+    *,
+    attempts: int = 4,
+) -> tuple[str, bool, bool]:
+    snapshot = ""
+    wait_steps = [500, 800, 1100, 1400]
+    for attempt in range(max(1, attempts)):
+        if attempt:
+            await page.wait_for_timeout(wait_steps[min(attempt, len(wait_steps) - 1)])
+        snapshot = await krisha_detail_snapshot(page)
+        leads = extract_krisha_leads_from_text(snapshot, payload, default_country_code)
+        if leads:
+            krisha_log(
+                "Телефон Krisha найден после показа номера",
+                payload={"url": detail_url, "phones": len({lead["phone"] for lead in leads})},
+            )
+            return snapshot, True, False
+        captcha_visible = is_captcha_page(snapshot) or await krisha_captcha_widget_visible(page)
+        if captcha_visible:
+            return snapshot, False, True
+    return snapshot, False, is_captcha_page(snapshot) or await krisha_captcha_widget_visible(page)
+
+
 async def krisha_browser_is_login_finished(page: Any) -> bool:
-    if is_captcha_page(await page.content()):
+    content = await krisha_page_content(page, attempts=2, wait_ms=500)
+    if content is None:
+        return False
+    if is_captcha_page(content):
         return False
     if "id.kolesa.kz" in page.url or "/login" in page.url:
         return False
@@ -1759,14 +2207,42 @@ async def krisha_browser_is_login_finished(page: Any) -> bool:
     return True
 
 
-async def krisha_wait_for_login_result(page: Any, context: Any, storage_state_path: Path, errors: list[str], *, headless: bool) -> bool:
+async def krisha_wait_for_login_result(
+    page: Any,
+    context: Any,
+    storage_state_path: Path,
+    errors: list[str],
+    *,
+    headless: bool,
+    settings: dict[str, str] | None = None,
+) -> bool:
     wait_seconds = 35 if headless else 180
     krisha_log("Ожидаю завершения авторизации Krisha", payload={"url": page.url, "timeout_seconds": wait_seconds})
     for _ in range(wait_seconds):
-        content = await page.content()
+        content = await krisha_page_content(page, attempts=3, wait_ms=700)
+        if content is None:
+            await page.wait_for_timeout(1000)
+            continue
         if is_captcha_page(content):
+            if await krisha_wait_for_manual_captcha(
+                page,
+                context,
+                storage_state_path,
+                stage="login_result",
+                timeout_seconds=wait_seconds if not headless else 0,
+                settings=settings,
+            ):
+                continue
             errors.append("login: captcha")
             krisha_log("Krisha запросила CAPTCHA на авторизации", level="warning", payload={"url": page.url})
+            return False
+        if krisha_login_credentials_rejected(content):
+            errors.append("login: invalid_credentials")
+            krisha_log(
+                "Krisha отклонила авторизацию: неверный логин или пароль",
+                level="warning",
+                payload={"url": page.url},
+            )
             return False
         if await krisha_browser_is_login_finished(page):
             await context.storage_state(path=str(storage_state_path))
@@ -1781,7 +2257,7 @@ async def krisha_wait_for_login_result(page: Any, context: Any, storage_state_pa
 async def krisha_click_or_enter(page: Any, locator: Any, fallback_locator: Any | None = None) -> str:
     try:
         if await locator.count():
-            await locator.first.click(timeout=5000)
+            await locator.first.click(timeout=KRISHA_LOGIN_INTERACTION_TIMEOUT_MS)
             return "click"
     except Exception:
         pass
@@ -1793,6 +2269,487 @@ async def krisha_click_or_enter(page: Any, locator: Any, fallback_locator: Any |
         return "enter"
     except Exception:
         return "none"
+
+
+async def krisha_find_frame_locator(page: Any, selectors: list[str], inner_selector: str) -> tuple[Any | None, str | None]:
+    for sel in selectors:
+        try:
+            frame_count = await page.locator(sel).count()
+        except Exception:
+            continue
+        for index in range(frame_count):
+            frame = page.frame_locator(sel).nth(index)
+            try:
+                if await frame.locator(inner_selector).count() == 0:
+                    continue
+            except Exception:
+                continue
+            if frame_count > 1:
+                return frame, f"{sel} nth({index})"
+            return frame, sel
+    return None, None
+
+
+async def krisha_find_recaptcha_challenge_frame(page: Any) -> tuple[Any | None, str | None]:
+    challenge_selectors = [
+        "iframe[src*='recaptcha/api2/bframe']",
+        "iframe[title*='срок действия']",
+        "iframe[title*='Срок действия']",
+        "iframe[title*='reCAPTCHA challenge']",
+        "iframe[title*='тест reCAPTCHA']",
+        "iframe[title*='проверка reCAPTCHA']",
+    ]
+    inner_selector = (
+        "#recaptcha-audio-button, button.rc-button-audio, "
+        "#audio-response, input#audio-response, "
+        "#audio-source, audio#audio-source, "
+        "#recaptcha-verify-button, #rc-imageselect, .rc-imageselect, "
+        ".rc-audiochallenge-error-message"
+    )
+    frame, selector = await krisha_find_frame_locator(page, challenge_selectors, inner_selector)
+    if frame is not None:
+        return frame, selector
+
+    for sel in challenge_selectors:
+        try:
+            frame_count = await page.locator(sel).count()
+        except Exception:
+            continue
+        if frame_count <= 0:
+            continue
+        frame = page.frame_locator(sel).nth(0)
+        return frame, f"{sel} nth(0)"
+    return None, None
+
+
+def normalize_recaptcha_audio_answer(text: str) -> str:
+    normalized = html.unescape(text or "").strip().lower()
+    normalized = re.sub(r"[^0-9a-zа-яё\s-]+", " ", normalized, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+async def krisha_click_recaptcha_reload(page: Any, challenge_iframe: Any, *, stage: str) -> bool:
+    reload_btn = challenge_iframe.locator("#recaptcha-reload-button")
+    try:
+        if await reload_btn.count() == 0:
+            krisha_log("Кнопка обновления аудио CAPTCHA не найдена", level="warning", payload={"stage": stage})
+            return False
+    except Exception as exc:
+        krisha_log(
+            "Не удалось проверить кнопку обновления аудио CAPTCHA",
+            level="warning",
+            payload={"stage": stage, "error": str(exc)},
+        )
+        return False
+
+    target = reload_btn.first
+    for attempt in range(1, 4):
+        try:
+            await target.wait_for(state="visible", timeout=2500)
+        except Exception:
+            pass
+        try:
+            visible = await target.is_visible()
+        except Exception:
+            visible = True
+        if not visible:
+            krisha_log(
+                "Кнопка обновления аудио CAPTCHA сейчас не видна",
+                level="warning",
+                payload={"stage": stage, "attempt": attempt},
+            )
+            await page.wait_for_timeout(1000)
+            continue
+        try:
+            enabled = await target.is_enabled()
+        except AttributeError:
+            enabled = True
+        except Exception:
+            enabled = True
+        if not enabled:
+            krisha_log(
+                "Кнопка обновления аудио CAPTCHA временно выключена",
+                level="warning",
+                payload={"stage": stage, "attempt": attempt},
+            )
+            await page.wait_for_timeout(1200)
+            continue
+        try:
+            krisha_log("Перезагружаю аудио-челлендж для следующей попытки...", payload={"stage": stage})
+            try:
+                await target.click(timeout=2500)
+            except TypeError:
+                await target.click()
+            await page.wait_for_timeout(1500)
+            return True
+        except Exception as exc:
+            krisha_log(
+                "Кнопка обновления аудио CAPTCHA недоступна",
+                level="warning",
+                payload={"stage": stage, "attempt": attempt, "error": str(exc)},
+            )
+            await page.wait_for_timeout(1200)
+    return False
+
+
+async def krisha_solve_recaptcha_audio(
+    page: Any,
+    context: Any,
+    settings: dict[str, str],
+    *,
+    stage: str,
+    max_retries: int = 4,
+) -> bool:
+    krisha_log("Запуск автоматического обхода reCAPTCHA через аудио-вызов", payload={"stage": stage})
+    try:
+        # Список всех фреймов для отладки
+        iframes_info = []
+        try:
+            iframes_count = await page.locator("iframe").count()
+            for i in range(iframes_count):
+                iframe = page.locator("iframe").nth(i)
+                try:
+                    src = await iframe.get_attribute("src", timeout=1000) or ""
+                except Exception:
+                    src = "<timeout/error>"
+                try:
+                    title = await iframe.get_attribute("title", timeout=1000) or ""
+                except Exception:
+                    title = "<timeout/error>"
+                try:
+                    name = await iframe.get_attribute("name", timeout=1000) or ""
+                except Exception:
+                    name = "<timeout/error>"
+                iframes_info.append({"index": i, "src": src, "title": title, "name": name})
+        except Exception as e:
+            iframes_info = [f"Error listing iframes: {e}"]
+        krisha_log("Найденные iframe на странице", payload={"iframes": iframes_info})
+
+        # 1. Поиск чекбокса reCAPTCHA
+        anchor_iframe, anchor_selector = await krisha_find_frame_locator(page, [
+            "iframe[src*='recaptcha/api2/anchor']",
+            "iframe[title*='reCAPTCHA']",
+            "iframe[title*='простая капча']",
+            "iframe[title*='Я не робот']",
+            "iframe[title*='я не робот']"
+        ], "#recaptcha-anchor, .recaptcha-checkbox-border, .recaptcha-checkbox")
+        if anchor_iframe is not None:
+            krisha_log(f"Найден фрейм чекбокса reCAPTCHA по селектору: {anchor_selector}", payload={"stage": stage})
+
+        if anchor_iframe is None:
+            # Динамический скан всех фреймов на чекбокс капчи
+            try:
+                iframes_count = await page.locator("iframe").count()
+                for i in range(iframes_count):
+                    frame = page.frame_locator("iframe").nth(i)
+                    if await frame.locator("#recaptcha-anchor, .recaptcha-checkbox-border, .recaptcha-checkbox").count() > 0:
+                        anchor_iframe = frame
+                        krisha_log(f"Найден фрейм чекбокса капчи при динамическом сканировании nth({i})", payload={"stage": stage})
+                        break
+            except Exception as e:
+                krisha_log(f"Ошибка при динамическом сканировании чекбоксов: {e}", level="warning")
+
+        if anchor_iframe is not None:
+            checkbox = anchor_iframe.locator("#recaptcha-anchor, .recaptcha-checkbox-border, .recaptcha-checkbox")
+            if await checkbox.count() > 0:
+                checkbox_target = checkbox.first
+                if await checkbox_target.is_visible():
+                    aria_checked = await checkbox_target.get_attribute("aria-checked")
+                    if aria_checked == "true":
+                        krisha_log("Чекбокс reCAPTCHA уже отмечен зелёной галочкой", payload={"stage": stage})
+                        # Проверяем, не исчезла ли сама капча полностью
+                        content = await krisha_page_content(page, attempts=2, wait_ms=500) or ""
+                        if not is_captcha_page(content):
+                            return True
+                    else:
+                        krisha_log("Нажимаю на чекбокс reCAPTCHA...", payload={"stage": stage})
+                        await checkbox_target.click()
+                        await page.wait_for_timeout(2500)
+                        
+                        # Проверим, вдруг чекбокс сразу отметился (без окна с заданиями)
+                        aria_checked = await checkbox_target.get_attribute("aria-checked")
+                        if aria_checked == "true":
+                            krisha_log("Чекбокс reCAPTCHA успешно отмечен после клика", payload={"stage": stage})
+                            return True
+        else:
+            krisha_log("Фрейм чекбокса капчи не обнаружен. Возможно, это невидимая капча или капча уже открыта.", payload={"stage": stage})
+
+        # 2. Фрейм с заданием (bframe/challenge)
+        for attempt in range(1, max_retries + 1):
+            krisha_log(f"Попытка решения аудио-капчи: {attempt}/{max_retries}", payload={"stage": stage})
+
+            challenge_iframe, challenge_selector = await krisha_find_recaptcha_challenge_frame(page)
+            if challenge_iframe is not None:
+                krisha_log(f"Найден фрейм аудио-вызова по селектору: {challenge_selector}", payload={"stage": stage})
+
+            if challenge_iframe is None:
+                # Динамический скан всех фреймов на аудио кнопку
+                try:
+                    iframes_count = await page.locator("iframe").count()
+                    for i in range(iframes_count):
+                        frame = page.frame_locator("iframe").nth(i)
+                        if await frame.locator("#recaptcha-audio-button, button.rc-button-audio").count() > 0:
+                            challenge_iframe = frame
+                            krisha_log(f"Найден фрейм аудио-вызова при динамическом сканировании nth({i})", payload={"stage": stage})
+                            break
+                except Exception as e:
+                    krisha_log(f"Ошибка при динамическом поиске фрейма аудио-кнопки: {e}", level="warning")
+
+            if challenge_iframe is None:
+                content = await krisha_page_content(page, attempts=2, wait_ms=500) or ""
+                if not is_captcha_page(content):
+                    krisha_log("Капча больше не зарегистрирована на странице (исчезла)", payload={"stage": stage})
+                    return True
+                krisha_log(
+                    "Фрейм аудио-вызова reCAPTCHA пока не появился",
+                    level="warning",
+                    payload={"stage": stage, "attempt": attempt, "max_retries": max_retries},
+                )
+                await page.wait_for_timeout(3000)
+                continue
+
+            response_input = challenge_iframe.locator("#audio-response, input#audio-response")
+            audio_source = challenge_iframe.locator("#audio-source, audio#audio-source")
+            audio_mode_active = False
+            try:
+                audio_mode_active = await response_input.count() > 0 or await audio_source.count() > 0
+            except Exception:
+                audio_mode_active = False
+
+            if audio_mode_active:
+                krisha_log("Аудио-челлендж уже открыт, повторно кнопку не нажимаю", payload={"stage": stage})
+            else:
+                audio_btn = challenge_iframe.locator("#recaptcha-audio-button, button.rc-button-audio")
+                audio_btn_target = audio_btn.first
+                try:
+                    await audio_btn_target.wait_for(state="visible", timeout=3000)
+                except Exception:
+                    pass
+
+                krisha_log("Нажимаю кнопку перехода на аудио-челлендж...", payload={"stage": stage})
+                if await audio_btn.count() == 0:
+                    krisha_log(
+                        "Фрейм reCAPTCHA найден, но кнопка аудио-вызова пока недоступна",
+                        level="warning",
+                        payload={"stage": stage, "attempt": attempt, "max_retries": max_retries},
+                    )
+                    await page.wait_for_timeout(2500)
+                    continue
+                await audio_btn_target.click()
+                await page.wait_for_timeout(2500)
+            
+            # Проверим, не заблокирован ли адрес (IP-block)
+            blocked_msg = challenge_iframe.locator(".rc-audiochallenge-error-message, :has-text('automated queries'), :has-text('компьютер или сеть')")
+            if await blocked_msg.count() > 0 and await blocked_msg.first.is_visible():
+                text = await blocked_msg.first.text_content()
+                krisha_log(f"Google заблокировал аудио-вызовы с этого IP: {text}", level="error", payload={"stage": stage})
+                return False
+
+            # Ищем аудио-дорожку
+            audio_source_target = audio_source.first
+            try:
+                await audio_source_target.wait_for(state="attached", timeout=5000)
+            except Exception:
+                pass
+                
+            if await audio_source.count() == 0:
+                krisha_log("Элемент аудио-дорожки #audio-source не найден", level="warning", payload={"stage": stage})
+                if not await krisha_click_recaptcha_reload(page, challenge_iframe, stage=stage):
+                    return False
+                continue
+                
+            audio_url = await audio_source_target.get_attribute("src")
+            if not audio_url:
+                krisha_log("Ссылка на аудио-файл капчи пуста", level="warning", payload={"stage": stage})
+                continue
+                
+            krisha_log(f"Скачиваю аудио-челлендж с Google", payload={"audio_url": audio_url, "stage": stage})
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    audio_response = await client.get(audio_url)
+                    audio_response.raise_for_status()
+                    audio_data = audio_response.content
+            except Exception as e:
+                krisha_log(f"Не удалось скачать аудио-файл по ссылке: {e}", level="warning", payload={"stage": stage})
+                continue
+                
+            # Транскрибация
+            groq_key = settings.get("groq_api_key", "").strip()
+            openai_key = settings.get("openai_api_key", "").strip()
+            
+            transcription_text = ""
+            if groq_key:
+                krisha_log("Выполняю STT в Groq Whisper...", payload={"stage": stage})
+                base_url = settings.get("groq_base_url", "https://api.groq.com/openai/v1").rstrip("/")
+                model = settings.get("groq_transcription_model", "whisper-large-v3-turbo").strip() or "whisper-large-v3-turbo"
+                headers = {"Authorization": f"Bearer {groq_key}"}
+                files = {"file": ("audio.mp3", audio_data, "audio/mpeg")}
+                data = {
+                    "model": model,
+                    "response_format": "json",
+                    "temperature": "0",
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.post(
+                            f"{base_url}/audio/transcriptions",
+                            data=data,
+                            files=files,
+                            headers=headers,
+                        )
+                        resp.raise_for_status()
+                        transcription_text = resp.json().get("text", "").strip()
+                except Exception as e:
+                    krisha_log(f"Ошибка транскрибации Groq: {e}", level="warning")
+                    
+            if not transcription_text and openai_key:
+                krisha_log("Выполняю API-запрос STT в OpenAI...", payload={"stage": stage})
+                base_url = settings.get("openai_base_url", "https://api.openai.com/v1").rstrip("/")
+                model = settings.get("openai_transcription_model", "whisper-1").strip() or "whisper-1"
+                headers = {"Authorization": f"Bearer {openai_key}"}
+                files = {"file": ("audio.mp3", audio_data, "audio/mpeg")}
+                data = {
+                    "model": model,
+                    "response_format": "json",
+                    "temperature": "0",
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.post(
+                            f"{base_url}/audio/transcriptions",
+                            data=data,
+                            files=files,
+                            headers=headers,
+                        )
+                        resp.raise_for_status()
+                        transcription_text = resp.json().get("text", "").strip()
+                except Exception as e:
+                    krisha_log(f"Ошибка транскрибации OpenAI: {e}", level="warning")
+                    
+            if not transcription_text:
+                krisha_log("Не настроены ключи AI-STT (Groq/OpenAI) или транскрибация завершилась ошибкой. Пропускаю попытку.", level="warning")
+                if not await krisha_click_recaptcha_reload(page, challenge_iframe, stage=stage):
+                    return False
+                continue
+
+            answer_text = normalize_recaptcha_audio_answer(transcription_text) or transcription_text.strip()
+            krisha_log(
+                f"Получен текст аудио: '{transcription_text}'. Ввожу в форму решения.",
+                payload={"stage": stage, "normalized": answer_text},
+            )
+            response_input_target = response_input.first
+            await response_input_target.fill("")
+            await response_input_target.type(answer_text, delay=80)
+            await page.wait_for_timeout(1000)
+            
+            verify_btn = challenge_iframe.locator("#recaptcha-verify-button, button#recaptcha-verify-button")
+            await verify_btn.first.click()
+            await page.wait_for_timeout(3500)
+            
+            content_after = await krisha_page_content(page, attempts=2, wait_ms=500) or ""
+            if not is_captcha_page(content_after):
+                krisha_log("CAPTCHA решена автоматическим аудио обходом!", payload={"stage": stage})
+                return True
+
+            krisha_log("Текст капчи не подошел, пробуем еще раз (генерируем новую попытку)...", payload={"stage": stage})
+            if not await krisha_click_recaptcha_reload(page, challenge_iframe, stage=stage):
+                return False
+
+        content_final = await krisha_page_content(page, attempts=2, wait_ms=500) or ""
+        return not is_captcha_page(content_final)
+    except Exception as exc:
+        krisha_log(f"Ошибка при автоматическом решении аудио-капчи: {exc}", level="error", payload={"stage": stage})
+        return False
+
+
+async def krisha_wait_for_manual_captcha(
+    page: Any,
+    context: Any,
+    storage_state_path: Path,
+    *,
+    stage: str,
+    timeout_seconds: int = 180,
+    settings: dict[str, str] | None = None,
+) -> bool:
+    if settings is None:
+        settings = get_settings(KERAMO_PROJECT_ID)
+
+    current_url = getattr(page, "url", "")
+    krisha_log(
+        "Запрос капчи от Krisha. Попытка автоматического решения через аудио STT",
+        level="warning",
+        payload={"url": current_url, "stage": stage, "timeout_seconds": timeout_seconds},
+    )
+
+    # Попытка автоматического обхода reCAPTCHA через аудио
+    solved = await krisha_solve_recaptcha_audio(page, context, settings, stage=stage)
+    if solved:
+        await context.storage_state(path=str(storage_state_path))
+        krisha_log(
+            "CAPTCHA успешно пройдена автоматически, продолжаю Krisha-парсинг",
+            payload={"url": current_url, "stage": stage, "storage_state": str(storage_state_path)},
+        )
+        return True
+
+    # Для headless режима ручное решение невозможно в принципе:
+    headless = krisha_should_run_headless(settings)
+    if headless:
+        krisha_log(
+            "Автоматическое решение капчи не сработало, а headless-режим не позволяет пройти её вручную.",
+            level="error",
+            payload={"url": current_url, "stage": stage},
+        )
+        return False
+
+    if timeout_seconds <= 0:
+        return False
+
+    krisha_log(
+        "Автоматическое решение капчи не удалось. Жду ручное прохождение в видимом браузере...",
+        level="warning",
+        payload={"url": current_url, "stage": stage, "timeout_seconds": timeout_seconds},
+    )
+    for _ in range(timeout_seconds):
+        content = await krisha_page_content(page, attempts=2, wait_ms=500) or ""
+        if not is_captcha_page(content):
+            await context.storage_state(path=str(storage_state_path))
+            krisha_log(
+                "CAPTCHA снята вручную, продолжаю Krisha-парсинг",
+                payload={"url": current_url, "stage": stage, "storage_state": str(storage_state_path)},
+            )
+            return True
+        await page.wait_for_timeout(1000)
+
+    krisha_log(
+        "CAPTCHA не была снята за время ожидания",
+        level="warning",
+        payload={"url": current_url, "stage": stage, "timeout_seconds": timeout_seconds},
+    )
+    return False
+
+
+async def krisha_goto(
+    page: Any,
+    url: str,
+    *,
+    wait_until: str = "domcontentloaded",
+    timeout: int = 30_000,
+    context: str = "page",
+) -> bool:
+    try:
+        await page.goto(url, wait_until=wait_until, timeout=timeout)
+        return True
+    except Exception as exc:
+        krisha_log(
+            f"Загрузка Krisha не завершилась полностью: {exc}",
+            level="warning",
+            payload={"url": url, "current_url": getattr(page, "url", ""), "context": context},
+        )
+        try:
+            await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+        return False
 
 
 KRISHA_POPUP_CLOSE_SELECTORS = [
@@ -1817,42 +2774,69 @@ KRISHA_POPUP_BUTTON_SELECTORS = [
     "button:has-text('Отмена')",
 ]
 
+KRISHA_POPUP_BUTTON_TEXTS = [
+    "Не сейчас",
+    "Позже",
+    "Понятно",
+    "Закрыть",
+    "Пропустить",
+    "Нет, спасибо",
+    "Отмена",
+]
+
 
 async def close_krisha_popups(page: Any, *, reason: str = "") -> int:
     closed = 0
     try:
         await page.keyboard.press("Escape")
-        await page.wait_for_timeout(150)
+        await page.wait_for_timeout(80)
     except Exception:
         pass
 
     auth_visible = False
     try:
-        auth_visible = bool(await page.locator(".auth-modal, input[type='password']").count())
+        auth_visible = bool(await page.evaluate("Boolean(document.querySelector('.auth-modal, input[type=\"password\"]'))"))
     except Exception:
         auth_visible = False
 
     selectors = list(KRISHA_POPUP_CLOSE_SELECTORS)
     if not auth_visible:
         selectors.append(".vue-modal__close-btn")
-    selectors.extend(KRISHA_POPUP_BUTTON_SELECTORS)
-
-    for _ in range(2):
-        for selector in selectors:
-            try:
-                locator = page.locator(selector)
-                count = min(await locator.count(), 4)
-                for index in range(count):
-                    item = locator.nth(index)
-                    try:
-                        if await item.is_visible():
-                            await item.click(timeout=1200)
-                            closed += 1
-                            await page.wait_for_timeout(250)
-                    except Exception:
-                        continue
-            except Exception:
-                continue
+    try:
+        closed += int(
+            await page.evaluate(
+                """
+                ({ selectors, buttonTexts }) => {
+                    const visible = (el) => Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                    let closed = 0;
+                    for (const selector of selectors) {
+                        for (const el of Array.from(document.querySelectorAll(selector)).slice(0, 4)) {
+                            if (!visible(el)) continue;
+                            try {
+                                el.click();
+                                closed += 1;
+                            } catch (error) {}
+                        }
+                    }
+                    for (const button of Array.from(document.querySelectorAll('button')).slice(0, 80)) {
+                        if (!visible(button)) continue;
+                        const text = (button.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (!buttonTexts.some((candidate) => text.includes(candidate))) continue;
+                        try {
+                            button.click();
+                            closed += 1;
+                        } catch (error) {}
+                    }
+                    return closed;
+                }
+                """,
+                {"selectors": selectors, "buttonTexts": KRISHA_POPUP_BUTTON_TEXTS},
+            )
+        )
+        if closed:
+            await page.wait_for_timeout(120)
+    except Exception:
+        pass
 
     if closed:
         krisha_log("Закрыл всплывающие окна Krisha", payload={"count": closed, "reason": reason, "url": page.url})
@@ -1860,49 +2844,150 @@ async def close_krisha_popups(page: Any, *, reason: str = "") -> int:
 
 
 async def click_krisha_phone_button(page: Any, detail_url: str) -> bool:
-    await close_krisha_popups(page, reason="before_phone_click")
+    async def dom_click_phone_button() -> bool:
+        try:
+            clicked = bool(
+                await page.evaluate(
+                    """
+                    () => {
+                        const buttons = Array.from(document.querySelectorAll('button.show-phones, button'));
+                        const button = buttons.find((item) => {
+                            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+                            return item.matches('button.show-phones') || text.includes('Показать телефон');
+                        });
+                        if (!button) return false;
+                        button.scrollIntoView({ block: 'center', inline: 'center' });
+                        button.click();
+                        return true;
+                    }
+                    """
+                )
+            )
+            if clicked:
+                krisha_log("Кнопка показа телефона нажата через DOM", payload={"url": detail_url})
+            return clicked
+        except Exception:
+            return False
+
     phone_button = page.locator("button.show-phones, button:has-text('Показать телефон')").first
-    if not await phone_button.count():
-        return False
+    try:
+        has_button = bool(await asyncio.wait_for(phone_button.count(), timeout=2))
+    except Exception:
+        has_button = False
+    if not has_button:
+        return await dom_click_phone_button()
     try:
         krisha_log("Нажимаю кнопку показа телефона", payload={"url": detail_url})
-        await phone_button.click(timeout=6000)
+        await phone_button.click(timeout=2500, no_wait_after=True)
         return True
     except Exception as exc:
+        if "click action done" in str(exc):
+            krisha_log("Кнопка показа телефона нажата, ожидание навигации пропущено", payload={"url": detail_url})
+            return True
         krisha_log(
-            f"Обычный клик по телефону заблокирован, закрываю попапы и пробую еще раз: {exc}",
+            f"Обычный клик по телефону заблокирован, пробую принудительно: {exc}",
             level="warning",
             payload={"url": detail_url},
         )
-        await close_krisha_popups(page, reason="phone_click_retry")
         phone_button = page.locator("button.show-phones, button:has-text('Показать телефон')").first
-        if not await phone_button.count():
-            return False
         try:
-            await phone_button.click(timeout=6000, force=True)
+            has_button = bool(await asyncio.wait_for(phone_button.count(), timeout=2))
+        except Exception:
+            has_button = False
+        if not has_button:
+            return await dom_click_phone_button()
+        try:
+            await phone_button.click(timeout=1800, force=True, no_wait_after=True)
             krisha_log("Кнопка показа телефона нажата повторно", payload={"url": detail_url})
             return True
         except Exception as retry_exc:
+            if "click action done" in str(retry_exc):
+                krisha_log("Кнопка показа телефона нажата повторно, ожидание навигации пропущено", payload={"url": detail_url})
+                return True
+            if await dom_click_phone_button():
+                return True
             krisha_log(f"Не удалось нажать кнопку показа телефона: {retry_exc}", level="error", payload={"url": detail_url})
             return False
+
+
+def krisha_phones_ajax_url(detail_content: str, detail_url: str) -> str | None:
+    match = re.search(r'"phonesUrl"\s*:\s*"([^"]+)"', detail_content or "")
+    if not match:
+        return None
+    raw_url = html.unescape(match.group(1)).replace("\\/", "/")
+    if not raw_url:
+        return None
+    return urljoin(detail_url, raw_url)
+
+
+def krisha_phone_values_from_ajax(data: Any) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    raw_phones = data.get("phones") or data.get("phone") or []
+    if isinstance(raw_phones, str):
+        raw_phones = [raw_phones]
+    phones: list[str] = []
+    if isinstance(raw_phones, list):
+        for item in raw_phones:
+            if isinstance(item, str):
+                phones.append(item)
+            elif isinstance(item, dict):
+                for value in item.values():
+                    if isinstance(value, str):
+                        phones.append(value)
+    return phones
+
+
+async def fetch_krisha_ajax_phones(context: Any, detail_url: str, detail_content: str) -> tuple[str, str | None]:
+    ajax_url = krisha_phones_ajax_url(detail_content, detail_url)
+    if not ajax_url:
+        return "", None
+    try:
+        response = await context.request.get(
+            ajax_url,
+            headers={"x-requested-with": "XMLHttpRequest", "referer": detail_url},
+            timeout=8_000,
+        )
+        data = await response.json()
+    except Exception as exc:
+        krisha_log("AJAX-запрос телефона Krisha не выполнен", level="warning", payload={"url": detail_url, "error": str(exc)})
+        return "", None
+    phones = krisha_phone_values_from_ajax(data)
+    if phones:
+        krisha_log("Телефоны Krisha получены через AJAX", payload={"url": detail_url, "phones": len(phones)})
+        return "\n".join(phones), None
+    if isinstance(data, dict) and data.get("gRecaptcha"):
+        krisha_log("Krisha запросила CAPTCHA при AJAX-показе телефона", level="warning", payload={"url": detail_url})
+        return "", "captcha"
+    return "", None
 
 
 async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str], storage_state_path: Path, errors: list[str]) -> bool:
     login = safe_cell(settings.get("krisha_login"))
     password = safe_cell(settings.get("krisha_password"))
-    headless = is_truthy(settings.get("krisha_headless"))
+    headless = krisha_should_run_headless(settings)
     if not login or not password:
         return True
 
     try:
         krisha_log("Открываю Krisha для авторизации", payload={"login": masked_secret(login), "headless": headless})
-        await page.goto("https://krisha.kz/my", wait_until="domcontentloaded", timeout=45_000)
+        await krisha_goto(page, "https://krisha.kz/my", wait_until="commit", timeout=45_000, context="login_open")
         await page.wait_for_timeout(800)
         krisha_log("Страница авторизации/кабинета открыта", payload={"url": page.url})
-        if is_captcha_page(await page.content()):
-            errors.append("login: captcha")
-            krisha_log("Krisha запросила CAPTCHA до ввода логина", level="warning", payload={"url": page.url})
-            return False
+        content = await krisha_page_content(page, attempts=3, wait_ms=700) or ""
+        if is_captcha_page(content):
+            if not await krisha_wait_for_manual_captcha(
+                page,
+                context,
+                storage_state_path,
+                stage="login_open",
+                timeout_seconds=180 if not headless else 0,
+                settings=settings,
+            ):
+                errors.append("login: captcha")
+                krisha_log("Krisha запросила CAPTCHA до ввода логина", level="warning", payload={"url": page.url})
+                return False
+            await page.wait_for_timeout(500)
 
         login_inputs = page.locator(
             "input[type='tel'], input[name='login'], input[name='phone'], input[name='email'], input[type='email'], input[type='text']"
@@ -1915,10 +3000,12 @@ async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str]
 
         if not await login_inputs.count():
             krisha_log("Форма логина не найдена, открываю страницу id.kolesa.kz", payload={"url": page.url})
-            await page.goto(
+            await krisha_goto(
+                page,
                 "https://id.kolesa.kz/login/?destination=https%3A%2F%2Fkrisha.kz%2Fmy",
                 wait_until="domcontentloaded",
                 timeout=45_000,
+                context="login_id_kolesa_open",
             )
             await page.wait_for_timeout(800)
             login_inputs = page.locator(
@@ -1926,13 +3013,23 @@ async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str]
             )
             password_inputs = page.locator("input[type='password'], input[name='password']")
 
-        if is_captcha_page(await page.content()):
-            errors.append("login: captcha")
-            krisha_log("Krisha запросила CAPTCHA на странице id.kolesa.kz", level="warning", payload={"url": page.url})
-            return False
+        content = await krisha_page_content(page, attempts=3, wait_ms=700) or ""
+        if is_captcha_page(content):
+            if not await krisha_wait_for_manual_captcha(
+                page,
+                context,
+                storage_state_path,
+                stage="login_id_kolesa",
+                timeout_seconds=180 if not headless else 0,
+                settings=settings,
+            ):
+                errors.append("login: captcha")
+                krisha_log("Krisha запросила CAPTCHA на странице id.kolesa.kz", level="warning", payload={"url": page.url})
+                return False
+            await page.wait_for_timeout(500)
 
         if await login_inputs.count():
-            await login_inputs.first.fill(login)
+            await login_inputs.first.fill(login, timeout=KRISHA_LOGIN_INTERACTION_TIMEOUT_MS)
             krisha_log("Логин Krisha введен, отправляю первый шаг", payload={"url": page.url, "login": masked_secret(login)})
             submit = page.locator("button[type='submit'], input[type='submit'], button:has-text('Продолжить'), button:has-text('Войти'), button:has-text('Далее'), button:has-text('Кіру')").first
             method = await krisha_click_or_enter(page, submit, login_inputs)
@@ -1942,7 +3039,10 @@ async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str]
             except Exception:
                 pass
             try:
-                await page.wait_for_selector("input[type='password'], input[name='password']", timeout=12_000)
+                await page.wait_for_selector(
+                    "input[type='password'], input[name='password']",
+                    timeout=KRISHA_LOGIN_INTERACTION_TIMEOUT_MS,
+                )
                 krisha_log("Поле пароля появилось", payload={"url": page.url})
             except Exception:
                 krisha_log("Поле пароля не появилось после первого шага", level="warning", payload={"url": page.url})
@@ -1950,7 +3050,7 @@ async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str]
 
         password_inputs = page.locator("input[type='password'], input[name='password']")
         if await password_inputs.count():
-            await password_inputs.first.fill(password)
+            await password_inputs.first.fill(password, timeout=KRISHA_LOGIN_INTERACTION_TIMEOUT_MS)
             krisha_log("Пароль Krisha введен, отправляю вход", payload={"url": page.url})
             submit = page.locator("button[type='submit'], input[type='submit'], button:has-text('Войти'), button:has-text('Продолжить'), button:has-text('Далее'), button:has-text('Кіру')").first
             method = await krisha_click_or_enter(page, submit, password_inputs)
@@ -1963,16 +3063,1094 @@ async def krisha_browser_login(page: Any, context: Any, settings: dict[str, str]
         else:
             krisha_log("Поле пароля не найдено, перехожу к ожиданию результата авторизации", level="warning", payload={"url": page.url})
 
-        content = await page.content()
+        content = await krisha_page_content(page, attempts=5, wait_ms=900) or ""
         if is_captcha_page(content):
-            errors.append("login: captcha")
-            krisha_log("Krisha запросила CAPTCHA после отправки пароля", level="warning", payload={"url": page.url})
-            return False
-        return await krisha_wait_for_login_result(page, context, storage_state_path, errors, headless=headless)
+            if not await krisha_wait_for_manual_captcha(
+                page,
+                context,
+                storage_state_path,
+                stage="login_after_password",
+                timeout_seconds=180 if not headless else 0,
+                settings=settings,
+            ):
+                errors.append("login: captcha")
+                krisha_log("Krisha запросила CAPTCHA после отправки пароля", level="warning", payload={"url": page.url})
+                return False
+        return await krisha_wait_for_login_result(page, context, storage_state_path, errors, headless=headless, settings=settings)
     except Exception as exc:
         errors.append(f"login: {exc}")
         krisha_log(f"Ошибка авторизации Krisha: {exc}", level="error", payload={"url": getattr(page, "url", "")})
         return False
+
+
+def krisha_selenium_chrome_executable(settings: dict[str, str]) -> str | None:
+    explicit_path = safe_cell(settings.get("krisha_chrome_executable_path"))
+    if explicit_path and Path(explicit_path).exists():
+        return explicit_path
+    for env_name in ("CHROME_BIN", "GOOGLE_CHROME_BIN", "CHROMIUM_BIN"):
+        env_path = safe_cell(os.environ.get(env_name))
+        if env_path and Path(env_path).exists():
+            return env_path
+    for binary_name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(binary_name)
+        if found:
+            return found
+    playwright_roots = [
+        safe_cell(os.environ.get("PLAYWRIGHT_BROWSERS_PATH")),
+        str(Path.home() / ".cache" / "ms-playwright"),
+        str(DATA_DIR.parent / "ms-playwright"),
+    ]
+    patterns = [
+        "chromium-*/chrome-linux*/chrome",
+        "chromium-*/chrome-win*/chrome.exe",
+        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for root in playwright_roots:
+        if not root:
+            continue
+        base = Path(root)
+        if not base.exists():
+            continue
+        for pattern in patterns:
+            matches = sorted(base.glob(pattern), reverse=True)
+            for match in matches:
+                if match.exists():
+                    return str(match)
+    return None
+
+
+def krisha_selenium_chrome_major_version(chrome_path: str | None) -> int | None:
+    if not chrome_path:
+        return None
+    try:
+        result = subprocess.run(
+            [chrome_path, "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return None
+    output = f"{result.stdout or ''} {result.stderr or ''}"
+    match = re.search(r"\b(\d{2,3})\.\d+\.\d+\.\d+\b", output)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def krisha_selenium_profile_directory(settings: dict[str, str]) -> Path:
+    proxy_server = (safe_cell(settings.get("krisha_proxy_server")) or "").lower()
+    if not proxy_server:
+        return DATA_DIR / "krisha_selenium_profile"
+    digest = hashlib.sha1(proxy_server.encode("utf-8")).hexdigest()[:12]
+    return DATA_DIR / f"krisha_selenium_profile_proxy_{digest}"
+
+
+def krisha_selenium_user_agent(chrome_major_version: int | None) -> str:
+    major = chrome_major_version or 120
+    return f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+
+
+def krisha_selenium_apply_stealth(driver: Any, chrome_major_version: int | None) -> None:
+    major = chrome_major_version or 120
+    user_agent = krisha_selenium_user_agent(major)
+    full_version = f"{major}.0.0.0"
+    try:
+        driver.execute_cdp_cmd(
+            "Network.setUserAgentOverride",
+            {
+                "userAgent": user_agent,
+                "acceptLanguage": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "platform": "Linux x86_64",
+                "userAgentMetadata": {
+                    "brands": [
+                        {"brand": "Chromium", "version": str(major)},
+                        {"brand": "Google Chrome", "version": str(major)},
+                        {"brand": "Not.A/Brand", "version": "24"},
+                    ],
+                    "fullVersionList": [
+                        {"brand": "Chromium", "version": full_version},
+                        {"brand": "Google Chrome", "version": full_version},
+                        {"brand": "Not.A/Brand", "version": "24.0.0.0"},
+                    ],
+                    "platform": "Linux",
+                    "platformVersion": "6.8.0",
+                    "architecture": "x86",
+                    "model": "",
+                    "mobile": False,
+                },
+            },
+        )
+    except Exception as exc:
+        krisha_log("Selenium v2 не смог применить UA override", level="warning", payload={"error": str(exc)[:300]})
+    for command, params in (
+        ("Emulation.setLocaleOverride", {"locale": "ru-RU"}),
+        ("Emulation.setTimezoneOverride", {"timezoneId": ASTANA_TIMEZONE}),
+        (
+            "Emulation.setGeolocationOverride",
+            {"latitude": 51.128, "longitude": 71.430, "accuracy": 100},
+        ),
+    ):
+        try:
+            driver.execute_cdp_cmd(command, params)
+        except Exception:
+            pass
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
+                Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                if (!window.chrome) {
+                  Object.defineProperty(window, 'chrome', {value: {runtime: {}}, configurable: true});
+                }
+                const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+                if (originalQuery) {
+                  window.navigator.permissions.query = (parameters) => (
+                    parameters && parameters.name === 'notifications'
+                      ? Promise.resolve({state: Notification.permission})
+                      : originalQuery(parameters)
+                  );
+                }
+                """
+            },
+        )
+    except Exception as exc:
+        krisha_log("Selenium v2 не смог применить stealth script", level="warning", payload={"error": str(exc)[:300]})
+    krisha_log("Selenium v2 применил browser fingerprint override", payload={"user_agent": user_agent})
+
+
+def krisha_selenium_page_url(driver: Any) -> str:
+    try:
+        return str(driver.current_url or "")
+    except Exception:
+        return ""
+
+
+def krisha_selenium_wait_ready(driver: Any, timeout_seconds: float = 12.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            state = driver.execute_script("return document.readyState")
+            if state in {"interactive", "complete"}:
+                return
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+
+def krisha_selenium_get(driver: Any, url: str, *, context: str = "page", timeout_seconds: int = 45) -> bool:
+    try:
+        driver.set_page_load_timeout(timeout_seconds)
+    except Exception:
+        pass
+    try:
+        driver.get(url)
+        krisha_selenium_wait_ready(driver, timeout_seconds=min(12, timeout_seconds))
+        return True
+    except Exception as exc:
+        error_text = str(exc)
+        if "timeout" not in error_text.lower() and "timed out receiving message from renderer" not in error_text.lower():
+            raise
+        krisha_log(
+            "Selenium v2 загрузка Krisha не завершилась полностью, продолжаю по текущему DOM",
+            level="warning",
+            payload={"url": url, "current_url": krisha_selenium_page_url(driver), "context": context, "error": error_text[:500]},
+        )
+        try:
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
+        krisha_selenium_wait_ready(driver, timeout_seconds=5)
+        return False
+
+
+def krisha_selenium_content(driver: Any) -> str:
+    source = ""
+    visible_text = ""
+    try:
+        source = driver.page_source or ""
+    except Exception:
+        source = ""
+    try:
+        from selenium.webdriver.common.by import By
+
+        visible_text = driver.find_element(By.TAG_NAME, "body").text or ""
+    except Exception:
+        visible_text = ""
+    return f"{source}\n{visible_text}"
+
+
+def krisha_selenium_find_elements(driver: Any, selector: str) -> list[Any]:
+    try:
+        from selenium.webdriver.common.by import By
+
+        return list(driver.find_elements(By.CSS_SELECTOR, selector))
+    except Exception:
+        return []
+
+
+def krisha_selenium_first(driver: Any, selector: str) -> Any | None:
+    elements = krisha_selenium_find_elements(driver, selector)
+    return elements[0] if elements else None
+
+
+def krisha_selenium_visible(element: Any) -> bool:
+    try:
+        return bool(element.is_displayed())
+    except Exception:
+        return True
+
+
+def krisha_selenium_js_click(driver: Any, element: Any) -> bool:
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'center'});", element)
+        time.sleep(0.1)
+    except Exception:
+        pass
+    try:
+        driver.execute_script("arguments[0].click();", element)
+        return True
+    except Exception:
+        try:
+            element.click()
+            return True
+        except Exception:
+            return False
+
+
+def krisha_selenium_click_submit(driver: Any, fallback: Any | None = None) -> str:
+    from selenium.webdriver.common.keys import Keys
+
+    preferred_texts = ("Продолжить", "Войти", "Далее", "Кіру")
+    buttons = krisha_selenium_find_elements(driver, "button[type='submit'], input[type='submit'], button")
+    for button in buttons[:80]:
+        try:
+            text = (button.text or button.get_attribute("value") or "").strip()
+        except Exception:
+            text = ""
+        try:
+            button_type = (button.get_attribute("type") or "").lower()
+        except Exception:
+            button_type = ""
+        if button_type == "submit" or any(item.lower() in text.lower() for item in preferred_texts):
+            if krisha_selenium_visible(button) and krisha_selenium_js_click(driver, button):
+                return "click"
+    if fallback is not None:
+        try:
+            fallback.send_keys(Keys.ENTER)
+            return "enter"
+        except Exception:
+            pass
+    return "none"
+
+
+def krisha_selenium_auth_prompt_visible(driver: Any) -> bool:
+    url = krisha_selenium_page_url(driver).lower()
+    if "id.kolesa.kz" in url or "/login" in url:
+        return True
+    if krisha_selenium_first(driver, "input[type='password'], input[name='password']") is not None:
+        return True
+    content = krisha_selenium_content(driver).lower()
+    return "id.kolesa.kz/login" in content or "auth-modal" in content
+
+
+def krisha_transcribe_recaptcha_audio_sync(audio_data: bytes, settings: dict[str, str], *, stage: str) -> str:
+    groq_key = safe_cell(settings.get("groq_api_key"))
+    openai_key = safe_cell(settings.get("openai_api_key"))
+    if groq_key:
+        krisha_log("Selenium v2 выполняет STT reCAPTCHA через Groq", payload={"stage": stage})
+        base_url = settings.get("groq_base_url", "https://api.groq.com/openai/v1").rstrip("/")
+        model = settings.get("groq_transcription_model", "whisper-large-v3-turbo").strip() or "whisper-large-v3-turbo"
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(
+                    f"{base_url}/audio/transcriptions",
+                    data={"model": model, "response_format": "json", "temperature": "0"},
+                    files={"file": ("audio.mp3", audio_data, "audio/mpeg")},
+                    headers={"Authorization": f"Bearer {groq_key}"},
+                )
+                response.raise_for_status()
+                text = str(response.json().get("text") or "").strip()
+                if text:
+                    return text
+        except Exception as exc:
+            krisha_log("Selenium v2 ошибка STT Groq reCAPTCHA", level="warning", payload={"stage": stage, "error": str(exc)[:300]})
+    if openai_key:
+        krisha_log("Selenium v2 выполняет STT reCAPTCHA через OpenAI", payload={"stage": stage})
+        base_url = settings.get("openai_base_url", "https://api.openai.com/v1").rstrip("/")
+        model = settings.get("openai_transcription_model", "whisper-1").strip() or "whisper-1"
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(
+                    f"{base_url}/audio/transcriptions",
+                    data={"model": model, "response_format": "json", "temperature": "0"},
+                    files={"file": ("audio.mp3", audio_data, "audio/mpeg")},
+                    headers={"Authorization": f"Bearer {openai_key}"},
+                )
+                response.raise_for_status()
+                text = str(response.json().get("text") or "").strip()
+                if text:
+                    return text
+        except Exception as exc:
+            krisha_log("Selenium v2 ошибка STT OpenAI reCAPTCHA", level="warning", payload={"stage": stage, "error": str(exc)[:300]})
+    return ""
+
+
+def krisha_selenium_switch_to_frame(driver: Any, selectors: list[str], inner_selector: str | None = None) -> str | None:
+    from selenium.webdriver.common.by import By
+
+    for selector in selectors:
+        try:
+            driver.switch_to.default_content()
+            frames = driver.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            frames = []
+        for frame in frames[:8]:
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(frame)
+                if not inner_selector or driver.find_elements(By.CSS_SELECTOR, inner_selector):
+                    return selector
+            except Exception:
+                continue
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return None
+
+
+def krisha_selenium_click_first_in_current_frame(driver: Any, selector: str) -> bool:
+    from selenium.webdriver.common.by import By
+
+    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+    for element in elements[:5]:
+        if not krisha_selenium_visible(element):
+            continue
+        if krisha_selenium_js_click(driver, element):
+            return True
+    return False
+
+
+def krisha_selenium_recaptcha_reload(driver: Any, *, stage: str) -> bool:
+    try:
+        if krisha_selenium_click_first_in_current_frame(driver, "#recaptcha-reload-button"):
+            krisha_log("Selenium v2 обновил audio challenge reCAPTCHA", payload={"stage": stage})
+            time.sleep(2.5)
+            return True
+    except Exception as exc:
+        krisha_log("Selenium v2 не смог обновить audio challenge reCAPTCHA", level="warning", payload={"stage": stage, "error": str(exc)[:300]})
+    return False
+
+
+def krisha_selenium_solve_recaptcha_audio(driver: Any, settings: dict[str, str], *, stage: str, attempts: int = 3) -> bool:
+    from selenium.webdriver.common.by import By
+
+    proxy_url = krisha_httpx_proxy_url(krisha_browser_proxy_settings(settings))
+    try:
+        anchor_selector = krisha_selenium_switch_to_frame(
+            driver,
+            ["iframe[src*='recaptcha/api2/anchor']", "iframe[title*='reCAPTCHA']"],
+            "#recaptcha-anchor, .recaptcha-checkbox-border, .recaptcha-checkbox",
+        )
+        if anchor_selector:
+            krisha_log("Selenium v2 нашел checkbox reCAPTCHA", payload={"stage": stage, "selector": anchor_selector})
+            krisha_selenium_click_first_in_current_frame(driver, "#recaptcha-anchor, .recaptcha-checkbox-border, .recaptcha-checkbox")
+            time.sleep(2.5)
+    except Exception as exc:
+        krisha_log("Selenium v2 не смог нажать checkbox reCAPTCHA", level="warning", payload={"stage": stage, "error": str(exc)[:300]})
+    finally:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    challenge_selectors = [
+        "iframe[src*='recaptcha/api2/bframe']",
+        "iframe[title*='reCAPTCHA challenge']",
+        "iframe[title*='проверка reCAPTCHA']",
+    ]
+    challenge_inner = (
+        "#recaptcha-audio-button, button.rc-button-audio, "
+        "#audio-response, input#audio-response, "
+        "#audio-source, audio#audio-source, "
+        "#recaptcha-verify-button, #rc-imageselect, .rc-imageselect"
+    )
+    for attempt in range(1, attempts + 1):
+        try:
+            selector = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and selector is None:
+                selector = krisha_selenium_switch_to_frame(driver, challenge_selectors, challenge_inner)
+                if selector is None:
+                    time.sleep(0.8)
+            if selector is None:
+                krisha_log("Selenium v2 не нашел challenge frame reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                continue
+            krisha_log("Selenium v2 нашел audio challenge reCAPTCHA", payload={"stage": stage, "attempt": attempt, "selector": selector})
+            frame_text = ""
+            try:
+                frame_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            except Exception:
+                frame_text = ""
+            if "automated queries" in frame_text or "компьютер или сеть" in frame_text:
+                krisha_log("Selenium v2 reCAPTCHA заблокировала audio challenge для сети", level="warning", payload={"stage": stage, "attempt": attempt})
+                return False
+
+            audio_source = driver.find_elements(By.CSS_SELECTOR, "#audio-source, audio#audio-source")
+            if not audio_source:
+                if not krisha_selenium_click_first_in_current_frame(driver, "#recaptcha-audio-button, button.rc-button-audio"):
+                    krisha_log("Selenium v2 не нашел кнопку audio reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                    return False
+                time.sleep(2.5)
+                audio_source = driver.find_elements(By.CSS_SELECTOR, "#audio-source, audio#audio-source")
+            if not audio_source:
+                krisha_log("Selenium v2 не получил audio source reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                if not krisha_selenium_recaptcha_reload(driver, stage=stage):
+                    return False
+                continue
+
+            audio_url = audio_source[0].get_attribute("src") or ""
+            if not audio_url:
+                krisha_log("Selenium v2 audio source reCAPTCHA пустой", level="warning", payload={"stage": stage, "attempt": attempt})
+                if not krisha_selenium_recaptcha_reload(driver, stage=stage):
+                    return False
+                continue
+
+            try:
+                client_kwargs: dict[str, Any] = {"timeout": 25, "follow_redirects": True}
+                if proxy_url:
+                    client_kwargs["proxy"] = proxy_url
+                with httpx.Client(**client_kwargs) as client:
+                    audio_response = client.get(audio_url)
+                    audio_response.raise_for_status()
+                    audio_data = audio_response.content
+            except Exception as exc:
+                krisha_log("Selenium v2 не скачал audio challenge reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt, "error": str(exc)[:300]})
+                if not krisha_selenium_recaptcha_reload(driver, stage=stage):
+                    return False
+                continue
+
+            transcription = krisha_transcribe_recaptcha_audio_sync(audio_data, settings, stage=stage)
+            answer = normalize_recaptcha_audio_answer(transcription) or transcription.strip()
+            if not answer:
+                krisha_log("Selenium v2 не получил STT-ответ reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                if not krisha_selenium_recaptcha_reload(driver, stage=stage):
+                    return False
+                continue
+
+            response_inputs = driver.find_elements(By.CSS_SELECTOR, "#audio-response, input#audio-response")
+            if not response_inputs:
+                krisha_log("Selenium v2 не нашел поле ответа audio reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                return False
+            response_inputs[0].clear()
+            response_inputs[0].send_keys(answer)
+            time.sleep(0.8)
+            if not krisha_selenium_click_first_in_current_frame(driver, "#recaptcha-verify-button, button#recaptcha-verify-button"):
+                krisha_log("Selenium v2 не нажал verify audio reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt})
+                return False
+            time.sleep(3.5)
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+            if not is_captcha_page(krisha_selenium_content(driver)):
+                krisha_log("Selenium v2 решил reCAPTCHA через audio STT", payload={"stage": stage, "attempt": attempt})
+                return True
+            selector = krisha_selenium_switch_to_frame(driver, challenge_selectors, challenge_inner)
+            if selector and not krisha_selenium_recaptcha_reload(driver, stage=stage):
+                return False
+        except Exception as exc:
+            krisha_log("Selenium v2 ошибка audio solver reCAPTCHA", level="warning", payload={"stage": stage, "attempt": attempt, "error": str(exc)[:300]})
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+    return not is_captcha_page(krisha_selenium_content(driver))
+
+
+def krisha_selenium_wait_for_manual_captcha(driver: Any, settings: dict[str, str], *, stage: str, timeout_seconds: int = 180) -> bool:
+    current_url = krisha_selenium_page_url(driver)
+    krisha_log(
+        "Selenium v2 получил CAPTCHA. Пробую автоматический audio solver",
+        level="warning",
+        payload={"url": current_url, "stage": stage},
+    )
+    if krisha_selenium_solve_recaptcha_audio(driver, settings, stage=stage):
+        krisha_log("Selenium v2 CAPTCHA пройдена через audio solver", payload={"url": krisha_selenium_page_url(driver), "stage": stage})
+        return True
+
+    headless = krisha_should_run_headless(settings)
+    if headless:
+        krisha_log(
+            "Selenium v2 не смог пройти CAPTCHA автоматически, а headless-режим не позволяет пройти её вручную",
+            level="error",
+            payload={"url": current_url, "stage": stage},
+        )
+        return False
+    krisha_log(
+        "Selenium v2 ждет ручное прохождение CAPTCHA в видимом браузере",
+        level="warning",
+        payload={"url": current_url, "stage": stage, "timeout_seconds": timeout_seconds},
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        content = krisha_selenium_content(driver)
+        if not is_captcha_page(content):
+            krisha_log("CAPTCHA снята вручную в Selenium v2", payload={"url": krisha_selenium_page_url(driver), "stage": stage})
+            return True
+        time.sleep(1)
+    return False
+
+
+def krisha_selenium_login(driver: Any, settings: dict[str, str], errors: list[str]) -> bool:
+    login = safe_cell(settings.get("krisha_login"))
+    password = safe_cell(settings.get("krisha_password"))
+    if not login or not password:
+        return True
+
+    try:
+        krisha_log(
+            "Selenium v2 открывает Krisha для авторизации",
+            payload={"login": masked_secret(login), "headless": krisha_should_run_headless(settings)},
+        )
+        krisha_selenium_get(driver, "https://krisha.kz/my", context="selenium_login_open", timeout_seconds=45)
+        time.sleep(1)
+        content = krisha_selenium_content(driver)
+        if is_captcha_page(content):
+            if not krisha_selenium_wait_for_manual_captcha(driver, settings, stage="selenium_login_open"):
+                errors.append("login: captcha")
+                return False
+        if not krisha_selenium_auth_prompt_visible(driver):
+            krisha_log("Selenium v2 использует активную Krisha-сессию", payload={"url": krisha_selenium_page_url(driver)})
+            return True
+
+        login_input = krisha_selenium_first(
+            driver,
+            "input[type='tel'], input[name='login'], input[name='phone'], input[name='email'], input[type='email'], input[type='text']",
+        )
+        if login_input is None:
+            krisha_selenium_get(
+                driver,
+                "https://id.kolesa.kz/login/?destination=https%3A%2F%2Fkrisha.kz%2Fmy",
+                context="selenium_login_id_kolesa",
+                timeout_seconds=45,
+            )
+            time.sleep(1)
+            login_input = krisha_selenium_first(
+                driver,
+                "input[type='tel'], input[name='login'], input[name='phone'], input[name='email'], input[type='email'], input[type='text']",
+            )
+
+        if login_input is not None:
+            login_input.clear()
+            login_input.send_keys(login)
+            method = krisha_selenium_click_submit(driver, login_input)
+            krisha_log(
+                "Selenium v2 отправил первый шаг авторизации",
+                payload={"url": krisha_selenium_page_url(driver), "method": method, "login": masked_secret(login)},
+            )
+            deadline = time.monotonic() + 18
+            while time.monotonic() < deadline and krisha_selenium_first(driver, "input[type='password'], input[name='password']") is None:
+                time.sleep(0.4)
+
+        password_input = krisha_selenium_first(driver, "input[type='password'], input[name='password']")
+        if password_input is not None:
+            password_input.clear()
+            password_input.send_keys(password)
+            method = krisha_selenium_click_submit(driver, password_input)
+            krisha_log("Selenium v2 отправил пароль Krisha", payload={"url": krisha_selenium_page_url(driver), "method": method})
+
+        deadline = time.monotonic() + 35
+        while time.monotonic() < deadline:
+            content = krisha_selenium_content(driver)
+            if is_captcha_page(content):
+                if krisha_selenium_wait_for_manual_captcha(driver, settings, stage="selenium_login_submit"):
+                    return True
+                errors.append("login: captcha")
+                return False
+            if krisha_login_credentials_rejected(content):
+                errors.append("login: invalid_credentials")
+                krisha_log("Selenium v2: Krisha отклонила логин или пароль", level="warning", payload={"url": krisha_selenium_page_url(driver)})
+                return False
+            if not krisha_selenium_auth_prompt_visible(driver):
+                krisha_log("Selenium v2 авторизация Krisha завершена", payload={"url": krisha_selenium_page_url(driver)})
+                return True
+            time.sleep(1)
+        errors.append("login: auth_timeout")
+        krisha_log("Selenium v2 авторизация Krisha не завершилась за время ожидания", level="warning", payload={"url": krisha_selenium_page_url(driver)})
+        return False
+    except Exception as exc:
+        errors.append(f"login: {exc}")
+        krisha_log(f"Selenium v2 ошибка авторизации Krisha: {exc}", level="error", payload={"url": krisha_selenium_page_url(driver)})
+        return False
+
+
+def close_krisha_popups_selenium(driver: Any, *, reason: str = "") -> int:
+    try:
+        from selenium.webdriver.common.keys import Keys
+
+        driver.switch_to.active_element.send_keys(Keys.ESCAPE)
+    except Exception:
+        pass
+    try:
+        closed = int(
+            driver.execute_script(
+                """
+                const selectors = arguments[0];
+                const buttonTexts = arguments[1];
+                const visible = (el) => Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                let closed = 0;
+                for (const selector of selectors) {
+                    for (const el of Array.from(document.querySelectorAll(selector)).slice(0, 4)) {
+                        if (!visible(el)) continue;
+                        try { el.click(); closed += 1; } catch (error) {}
+                    }
+                }
+                for (const button of Array.from(document.querySelectorAll('button')).slice(0, 80)) {
+                    if (!visible(button)) continue;
+                    const text = (button.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (!buttonTexts.some((candidate) => text.includes(candidate))) continue;
+                    try { button.click(); closed += 1; } catch (error) {}
+                }
+                return closed;
+                """,
+                KRISHA_POPUP_CLOSE_SELECTORS,
+                KRISHA_POPUP_BUTTON_TEXTS,
+            )
+            or 0
+        )
+    except Exception:
+        closed = 0
+    if closed:
+        time.sleep(0.2)
+        krisha_log("Selenium v2 закрыл всплывающие окна Krisha", payload={"count": closed, "reason": reason, "url": krisha_selenium_page_url(driver)})
+    return closed
+
+
+def click_krisha_phone_button_selenium(driver: Any, detail_url: str) -> bool:
+    buttons = krisha_selenium_find_elements(driver, "button.show-phones, button")
+    for button in buttons[:120]:
+        try:
+            text = (button.text or "").replace("\xa0", " ").strip()
+            class_name = button.get_attribute("class") or ""
+        except Exception:
+            text = ""
+            class_name = ""
+        if "show-phones" not in class_name and "Показать телефон" not in text:
+            continue
+        if not krisha_selenium_visible(button):
+            continue
+        krisha_log("Selenium v2 нажимает кнопку показа телефона", payload={"url": detail_url})
+        if krisha_selenium_js_click(driver, button):
+            time.sleep(2)
+            return True
+    try:
+        clicked = bool(
+            driver.execute_script(
+                """
+                const buttons = Array.from(document.querySelectorAll('button.show-phones, button'));
+                const button = buttons.find((item) => {
+                    const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+                    return item.matches('button.show-phones') || text.includes('Показать телефон');
+                });
+                if (!button) return false;
+                button.scrollIntoView({block:'center', inline:'center'});
+                button.click();
+                return true;
+                """
+            )
+        )
+        if clicked:
+            krisha_log("Selenium v2 нажал кнопку показа телефона через DOM", payload={"url": detail_url})
+            time.sleep(2)
+        return clicked
+    except Exception:
+        return False
+
+
+def fetch_krisha_ajax_phones_selenium(
+    driver: Any,
+    detail_url: str,
+    detail_content: str,
+    proxy_settings: dict[str, str] | None = None,
+) -> tuple[str, str | None]:
+    ajax_url = krisha_phones_ajax_url(detail_content, detail_url)
+    if not ajax_url:
+        return "", None
+    try:
+        user_agent = driver.execute_script("return navigator.userAgent") or ""
+    except Exception:
+        user_agent = ""
+    try:
+        cookies = "; ".join(
+            f"{item.get('name')}={item.get('value')}"
+            for item in driver.get_cookies()
+            if item.get("name") and item.get("value") is not None
+        )
+        headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "origin": "https://krisha.kz",
+            "x-requested-with": "XMLHttpRequest",
+            "referer": detail_url,
+        }
+        if user_agent:
+            headers["user-agent"] = user_agent
+        if cookies:
+            headers["cookie"] = cookies
+        client_kwargs: dict[str, Any] = {"timeout": 8}
+        proxy_url = krisha_httpx_proxy_url(proxy_settings)
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        with httpx.Client(**client_kwargs) as client:
+            response = client.get(ajax_url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        krisha_log("Selenium v2 AJAX-запрос телефона Krisha не выполнен", level="warning", payload={"url": detail_url, "error": str(exc)})
+        return "", None
+    phones = krisha_phone_values_from_ajax(data)
+    if phones:
+        krisha_log("Selenium v2 получил телефоны Krisha через AJAX", payload={"url": detail_url, "phones": len(phones)})
+        return "\n".join(phones), None
+    if isinstance(data, dict) and data.get("gRecaptcha"):
+        krisha_log(
+            "Selenium v2: Krisha запросила CAPTCHA при AJAX-показе телефона",
+            level="warning",
+            payload={"url": detail_url, "ajax_via_proxy": bool(proxy_settings)},
+        )
+        return "", "captcha"
+    return "", None
+
+
+def krisha_selenium_wait_for_phone_reveal(driver: Any, payload: KrishaImportRequest, default_country_code: str, detail_url: str) -> tuple[str, bool, bool]:
+    last_content = ""
+    for _ in range(12):
+        content = krisha_selenium_content(driver)
+        last_content = content
+        leads = extract_krisha_leads_from_text(content, payload, default_country_code)
+        if leads:
+            krisha_log("Selenium v2 нашел телефон Krisha после показа номера", payload={"url": detail_url, "phones": len(leads)})
+            return content, True, False
+        if is_captcha_page(content):
+            return content, False, True
+        time.sleep(1)
+    return last_content, False, is_captcha_page(last_content)
+
+
+def krisha_selenium_human_pause(min_seconds: float = 0.8, max_seconds: float = 2.4) -> None:
+    time.sleep(random.uniform(min_seconds, max_seconds))
+
+
+def krisha_selenium_humanize_page(driver: Any, *, reason: str = "") -> None:
+    try:
+        driver.execute_script(
+            """
+            const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+            const target = Math.min(height - window.innerHeight, Math.floor(250 + Math.random() * 900));
+            if (target > 0) window.scrollTo({top: target, behavior: 'smooth'});
+            """
+        )
+        time.sleep(random.uniform(0.45, 1.1))
+        driver.execute_script("window.scrollBy({top: -Math.floor(80 + Math.random() * 220), behavior: 'smooth'});")
+        time.sleep(random.uniform(0.25, 0.7))
+    except Exception:
+        pass
+    if reason:
+        krisha_log("Selenium v2 имитировал просмотр страницы", payload={"reason": reason, "url": krisha_selenium_page_url(driver)})
+
+
+def krisha_selenium_warm_up(driver: Any) -> None:
+    try:
+        krisha_log("Selenium v2 прогревает Krisha перед парсингом")
+        krisha_selenium_get(driver, "https://krisha.kz/", context="selenium_warmup", timeout_seconds=35)
+        krisha_selenium_human_pause(1.0, 2.2)
+        close_krisha_popups_selenium(driver, reason="selenium_warmup")
+        krisha_selenium_humanize_page(driver, reason="selenium_warmup")
+    except Exception as exc:
+        krisha_log("Selenium v2 warmup Krisha не завершился", level="warning", payload={"error": str(exc)[:300]})
+
+
+def collect_krisha_sources_selenium_undetected_sync(
+    payload: KrishaImportRequest,
+    urls: list[str],
+    settings: dict[str, str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    try:
+        import undetected_chromedriver as uc
+    except Exception as exc:
+        return [], [f"Selenium Undetected недоступен: {exc}. Проверьте зависимости selenium и undetected-chromedriver"]
+
+    collected: list[dict[str, str]] = []
+    errors: list[str] = []
+    search_urls = urls or krisha_search_urls_from_payload(payload)
+    seen_details: set[str] = set()
+    default_country_code = settings.get("default_country_code", "7")
+    headless = krisha_should_run_headless(settings)
+    profile_dir = krisha_selenium_profile_directory(settings)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    chrome_path = krisha_selenium_chrome_executable(settings)
+    chrome_major_version = krisha_selenium_chrome_major_version(chrome_path)
+    user_agent = krisha_selenium_user_agent(chrome_major_version)
+
+    options = uc.ChromeOptions()
+    options.add_argument("--lang=ru-RU")
+    options.add_argument("--accept-lang=ru-RU,ru,en-US,en")
+    options.add_argument("--window-size=1365,900")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--password-store=basic")
+    options.add_argument("--use-mock-keychain")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--hide-crash-restore-bubble")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+    options.add_argument(f"--user-agent={user_agent}")
+    options.add_experimental_option(
+        "prefs",
+        {
+            "credentials_enable_service": False,
+            "intl.accept_languages": "ru-RU,ru,en-US,en",
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.password_manager_enabled": False,
+            "session.restore_on_startup": 5,
+        },
+    )
+    options.page_load_strategy = "eager"
+    if headless:
+        options.add_argument("--headless=new")
+    proxy_settings = krisha_browser_proxy_settings(settings)
+    if proxy_settings:
+        proxy_server = proxy_settings.get("server") or ""
+        if proxy_server:
+            options.add_argument(f"--proxy-server={proxy_server}")
+        krisha_log(
+            "Selenium v2 запускается с browser proxy",
+            payload={
+                "server": proxy_server,
+                "username": masked_secret(proxy_settings.get("username")),
+                "has_password": bool(proxy_settings.get("password")),
+                "bypass": proxy_settings.get("bypass"),
+            },
+        )
+        if proxy_settings.get("username") or proxy_settings.get("password"):
+            krisha_log(
+                "Selenium v2 передает proxy server в Chrome; proxy с логином/паролем может потребовать proxy URL с встроенными credentials",
+                level="warning",
+                payload={"server": proxy_server},
+            )
+
+    driver = None
+    try:
+        krisha_log(
+            "Запускаю Selenium Undetected Krisha v2",
+            payload={
+                "headless": headless,
+                "search_urls": search_urls,
+                "max_pages": payload.max_pages,
+                "profile_dir": str(profile_dir),
+                "chrome_path": chrome_path,
+                "chrome_major_version": chrome_major_version,
+                "user_agent": user_agent,
+            },
+        )
+        kwargs: dict[str, Any] = {
+            "options": options,
+            "user_data_dir": str(profile_dir),
+            "use_subprocess": True,
+            "log_level": 3,
+        }
+        if chrome_path:
+            kwargs["browser_executable_path"] = chrome_path
+        if chrome_major_version:
+            kwargs["version_main"] = chrome_major_version
+        driver = uc.Chrome(**kwargs)
+        driver.set_page_load_timeout(45)
+        try:
+            driver.set_script_timeout(12)
+        except Exception:
+            pass
+        driver.implicitly_wait(0.2)
+        krisha_selenium_apply_stealth(driver, chrome_major_version)
+        krisha_selenium_warm_up(driver)
+
+        if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")):
+            logged_in = krisha_selenium_login(driver, settings, errors)
+            if not logged_in:
+                krisha_log("Selenium v2 авторизация Krisha не завершена, парсинг остановлен", level="warning", payload={"errors": errors[-5:]})
+                return collected, errors
+
+        for url in search_urls:
+            for page_num in range(1, payload.max_pages + 1):
+                page_url = krisha_page_url(url, page_num)
+                try:
+                    krisha_log("Selenium v2 открывает страницу поиска Krisha", payload={"url": page_url, "page": page_num})
+                    krisha_selenium_get(driver, page_url, context="selenium_search", timeout_seconds=45)
+                    krisha_selenium_human_pause(1.0, 2.2)
+                    if krisha_selenium_auth_prompt_visible(driver):
+                        logged_in = krisha_selenium_login(driver, settings, errors)
+                        if not logged_in:
+                            return collected, errors
+                        krisha_selenium_get(driver, page_url, context="selenium_search_after_auth", timeout_seconds=45)
+                        krisha_selenium_human_pause(1.0, 2.2)
+                    close_krisha_popups_selenium(driver, reason="selenium_search_page_loaded")
+                    krisha_selenium_humanize_page(driver, reason="selenium_search_page_loaded")
+                    content = krisha_selenium_content(driver)
+                    if is_captcha_page(content):
+                        if not krisha_selenium_wait_for_manual_captcha(driver, settings, stage="selenium_search_page"):
+                            errors.append(f"{page_url}: captcha")
+                            krisha_log("Selenium v2 CAPTCHA на странице поиска Krisha", level="warning", payload={"url": page_url})
+                            return collected, errors
+                        content = krisha_selenium_content(driver)
+                    detail_urls = krisha_detail_urls_from_text(content, limit=krisha_detail_url_limit(payload))
+                    empty_results = krisha_search_page_has_empty_results(content)
+                    if not detail_urls and not empty_results:
+                        errors.append(f"{page_url}: incomplete_search_page")
+                        krisha_log("Selenium v2 страница поиска не отдала карточки", level="warning", payload={"url": page_url, "current_url": krisha_selenium_page_url(driver)})
+                        continue
+                    collected.append({"source": page_url, "text": content})
+                    if krisha_collection_target_reached(payload, collected, default_country_code):
+                        return collected, errors
+                    krisha_log("Selenium v2 страница поиска обработана", payload={"url": page_url, "detail_urls": len(detail_urls), "empty_results": empty_results})
+                    if empty_results:
+                        continue
+                    for detail_url in detail_urls:
+                        if detail_url in seen_details:
+                            continue
+                        seen_details.add(detail_url)
+                        try:
+                            krisha_log("Selenium v2 открывает объявление Krisha", payload={"url": detail_url})
+                            krisha_selenium_get(driver, detail_url, context="selenium_detail", timeout_seconds=35)
+                            krisha_selenium_human_pause(1.0, 2.4)
+                            if krisha_selenium_auth_prompt_visible(driver):
+                                logged_in = krisha_selenium_login(driver, settings, errors)
+                                if not logged_in:
+                                    return collected, errors
+                                krisha_selenium_get(driver, detail_url, context="selenium_detail_after_auth", timeout_seconds=35)
+                                krisha_selenium_human_pause(1.0, 2.4)
+                            close_krisha_popups_selenium(driver, reason="selenium_detail_page_loaded")
+                            krisha_selenium_humanize_page(driver, reason="selenium_detail_page_loaded")
+                            detail_content = krisha_selenium_content(driver)
+                            if is_captcha_page(detail_content):
+                                if not krisha_selenium_wait_for_manual_captcha(driver, settings, stage="selenium_detail_page"):
+                                    errors.append(f"{detail_url}: captcha")
+                                    krisha_log("Selenium v2 CAPTCHA в объявлении Krisha", level="warning", payload={"url": detail_url})
+                                    return collected, errors
+                                detail_content = krisha_selenium_content(driver)
+
+                            ajax_phones, ajax_error = fetch_krisha_ajax_phones_selenium(driver, detail_url, detail_content, proxy_settings)
+                            if ajax_phones:
+                                collected.append({"source": detail_url, "text": f"{detail_content}\n{ajax_phones}"})
+                                if krisha_collection_target_reached(payload, collected, default_country_code):
+                                    return collected, errors
+                                continue
+
+                            clicked_phone = click_krisha_phone_button_selenium(driver, detail_url)
+                            phone_revealed = False
+                            phone_captcha_visible = False
+                            if clicked_phone:
+                                detail_content, phone_revealed, phone_captcha_visible = krisha_selenium_wait_for_phone_reveal(
+                                    driver,
+                                    payload,
+                                    default_country_code,
+                                    detail_url,
+                                )
+                                if krisha_selenium_auth_prompt_visible(driver):
+                                    logged_in = krisha_selenium_login(driver, settings, errors)
+                                    if not logged_in:
+                                        return collected, errors
+                                    krisha_selenium_get(driver, detail_url, context="selenium_detail_after_phone_auth", timeout_seconds=35)
+                                    krisha_selenium_human_pause(1.0, 2.4)
+                                    if click_krisha_phone_button_selenium(driver, detail_url):
+                                        detail_content, phone_revealed, phone_captcha_visible = krisha_selenium_wait_for_phone_reveal(
+                                            driver,
+                                            payload,
+                                            default_country_code,
+                                            detail_url,
+                                        )
+                            else:
+                                krisha_log("Selenium v2 кнопка показа телефона не найдена", level="warning", payload={"url": detail_url})
+
+                            if phone_revealed:
+                                collected.append({"source": detail_url, "text": detail_content})
+                                if krisha_collection_target_reached(payload, collected, default_country_code):
+                                    return collected, errors
+                                continue
+
+                            if phone_captcha_visible or is_captcha_page(detail_content):
+                                if krisha_selenium_wait_for_manual_captcha(driver, settings, stage="selenium_after_phone_click"):
+                                    detail_content = krisha_selenium_content(driver)
+                                    ajax_phones, _ = fetch_krisha_ajax_phones_selenium(driver, detail_url, detail_content, proxy_settings)
+                                    if ajax_phones:
+                                        collected.append({"source": detail_url, "text": f"{detail_content}\n{ajax_phones}"})
+                                        if krisha_collection_target_reached(payload, collected, default_country_code):
+                                            return collected, errors
+                                        continue
+                                errors.append(f"{detail_url}: captcha")
+                                krisha_log("Selenium v2 CAPTCHA после показа телефона", level="warning", payload={"url": detail_url})
+                                return collected, errors
+
+                            if ajax_error == "captcha" and not phone_revealed:
+                                errors.append(f"{detail_url}: captcha")
+                                krisha_log(
+                                    "Selenium v2 пропускает объявление после AJAX CAPTCHA и пробует следующее",
+                                    level="warning",
+                                    payload={"url": detail_url},
+                                )
+                                continue
+
+                            collected.append({"source": detail_url, "text": detail_content})
+                            if krisha_collection_target_reached(payload, collected, default_country_code):
+                                return collected, errors
+                        except Exception as exc:
+                            errors.append(f"{detail_url}: {exc}")
+                            krisha_log(f"Selenium v2 ошибка обработки объявления Krisha: {exc}", level="error", payload={"url": detail_url})
+                except Exception as exc:
+                    errors.append(f"{page_url}: {exc}")
+                    krisha_log(f"Selenium v2 ошибка страницы поиска Krisha: {exc}", level="error", payload={"url": page_url})
+                    break
+    except Exception as exc:
+        errors.append(f"selenium_browser: {exc}")
+        krisha_log(
+            f"Не удалось запустить Selenium Undetected Krisha v2: {exc}",
+            level="error",
+            payload={"headless": headless, "chrome_path": chrome_path, "chrome_major_version": chrome_major_version},
+        )
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            krisha_log("Selenium v2 браузер Krisha закрыт", payload={"sources": len(collected), "errors": len(errors)})
+    return collected, errors
+
+
+async def collect_krisha_sources_selenium_undetected(
+    payload: KrishaImportRequest,
+    urls: list[str],
+    settings: dict[str, str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    return await asyncio.to_thread(collect_krisha_sources_selenium_undetected_sync, payload, urls, settings)
 
 
 async def collect_krisha_sources_browser(
@@ -1988,15 +4166,35 @@ async def collect_krisha_sources_browser(
     collected: list[dict[str, str]] = []
     errors: list[str] = []
     storage_state_path = DATA_DIR / "krisha_storage_state.json"
+    has_saved_session = storage_state_path.exists()
     search_urls = urls or krisha_search_urls_from_payload(payload)
     seen_details: set[str] = set()
     default_country_code = settings.get("default_country_code", "7")
 
     async with async_playwright() as p:
-        headless = is_truthy(settings.get("krisha_headless"))
+        headless = krisha_should_run_headless(settings)
         krisha_log("Запускаю браузер Krisha", payload={"headless": headless, "search_urls": search_urls, "max_pages": payload.max_pages})
+        if headless and not is_truthy(settings.get("krisha_headless")):
+            krisha_log(
+                "Скрытый режим Krisha включен автоматически: на сервере нет графического дисплея",
+                level="warning",
+                payload={"display": bool(os.environ.get("DISPLAY")), "wayland": bool(os.environ.get("WAYLAND_DISPLAY"))},
+            )
+        launch_kwargs: dict[str, Any] = {"headless": headless}
+        proxy_settings = krisha_browser_proxy_settings(settings)
+        if proxy_settings:
+            launch_kwargs["proxy"] = proxy_settings
+            krisha_log(
+                "Для Krisha включен браузерный proxy",
+                payload={
+                    "server": proxy_settings.get("server"),
+                    "username": masked_secret(proxy_settings.get("username")),
+                    "has_password": bool(proxy_settings.get("password")),
+                    "bypass": proxy_settings.get("bypass"),
+                },
+            )
         try:
-            browser = await p.chromium.launch(headless=headless)
+            browser = await p.chromium.launch(**launch_kwargs)
         except Exception as exc:
             error_text = str(exc)
             if "executable doesn't exist" in error_text.lower():
@@ -2016,53 +4214,194 @@ async def collect_krisha_sources_browser(
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         }
         if storage_state_path.exists():
-            context_kwargs["storage_state"] = str(storage_state_path)
-            krisha_log("Загружаю сохраненную сессию Krisha", payload={"storage_state": str(storage_state_path)})
-        context = await browser.new_context(**context_kwargs)
-        page = await context.new_page()
+            sanitized_storage_state = krisha_sanitized_storage_state(storage_state_path)
+            if sanitized_storage_state is not None:
+                context_kwargs["storage_state"] = sanitized_storage_state
+                krisha_log(
+                    "Загружаю сохраненную сессию Krisha",
+                    payload={
+                        "storage_state": str(storage_state_path),
+                        "cookies": len(sanitized_storage_state.get("cookies") or []),
+                        "origins": len(sanitized_storage_state.get("origins") or []),
+                    },
+                )
+            else:
+                has_saved_session = False
         try:
-            if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")):
+            context = await browser.new_context(**context_kwargs)
+        except Exception as exc:
+            if "storage_state" not in context_kwargs:
+                errors.append(f"browser_context: {exc}")
+                krisha_log(
+                    f"Не удалось создать контекст браузера Krisha: {exc}",
+                    level="error",
+                    payload={"headless": headless, "search_urls": search_urls},
+                )
+                await browser.close()
+                return collected, errors
+            krisha_log(
+                "Сохраненная сессия Krisha не применилась, запускаю пустой контекст",
+                level="warning",
+                payload={"storage_state": str(storage_state_path), "error": str(exc)},
+            )
+            context_kwargs.pop("storage_state", None)
+            has_saved_session = False
+            try:
+                context = await browser.new_context(**context_kwargs)
+            except Exception as retry_exc:
+                errors.append(f"browser_context: {retry_exc}")
+                krisha_log(
+                    f"Не удалось создать контекст браузера Krisha без storage state: {retry_exc}",
+                    level="error",
+                    payload={"headless": headless, "search_urls": search_urls},
+                )
+                await browser.close()
+                return collected, errors
+        async def route_light_assets(route: Any) -> None:
+            if route.request.resource_type in {"font", "image", "media"}:
+                await route.abort()
+                return
+            await route.continue_()
+
+        await context.route("**/*", route_light_assets)
+        page = await context.new_page()
+        page.set_default_timeout(5_000)
+        page.set_default_navigation_timeout(30_000)
+        try:
+            if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")) and not has_saved_session:
                 logged_in = await krisha_browser_login(page, context, settings, storage_state_path, errors)
                 if not logged_in:
                     krisha_log("Авторизация Krisha не завершена, парсинг остановлен", level="warning", payload={"errors": errors[-5:]})
                     return collected, errors
+            elif has_saved_session:
+                krisha_log(
+                    "Использую сохраненную сессию Krisha без принудительной переавторизации",
+                    payload={"storage_state": str(storage_state_path)},
+                )
 
             for url in search_urls:
                 for page_num in range(1, payload.max_pages + 1):
                     page_url = krisha_page_url(url, page_num)
                     try:
                         krisha_log("Открываю страницу поиска Krisha", payload={"url": page_url, "page": page_num})
-                        await page.goto(page_url, wait_until="domcontentloaded", timeout=45_000)
+                        await krisha_goto(page, page_url, wait_until="domcontentloaded", timeout=30_000, context="search")
                         await page.wait_for_timeout(1200)
+                        if await krisha_browser_auth_prompt_visible(page) or "id.kolesa.kz" in page.url or "/login" in page.url:
+                            if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")):
+                                krisha_log("Krisha запросила авторизацию на странице поиска, выполняю lazy-login", payload={"url": page.url, "search_url": page_url})
+                                logged_in = await krisha_browser_login(page, context, settings, storage_state_path, errors)
+                                if not logged_in:
+                                    krisha_log("Lazy-login Krisha на странице поиска не завершен", level="warning", payload={"url": page.url, "errors": errors[-5:]})
+                                    return collected, errors
+                                await krisha_goto(page, page_url, wait_until="commit", timeout=30_000, context="search_after_auth")
+                                await page.wait_for_timeout(1200)
                         await close_krisha_popups(page, reason="search_page_loaded")
-                        content = await page.content()
+                        content = await krisha_page_content(page, attempts=3, wait_ms=500) or ""
+                        if is_captcha_page(content):
+                            if await krisha_wait_for_manual_captcha(
+                                page,
+                                context,
+                                storage_state_path,
+                                stage="search_page",
+                                timeout_seconds=180 if not headless else 0,
+                                settings=settings,
+                            ):
+                                await page.wait_for_timeout(500)
+                                content = await krisha_detail_snapshot(page)
+                            else:
+                                errors.append(f"{page_url}: captcha")
+                                krisha_log("CAPTCHA на странице поиска Krisha", level="warning", payload={"url": page_url})
+                                return collected, errors
+                        content, detail_urls, empty_results = await krisha_wait_for_search_results(page, payload)
                         if is_captcha_page(content):
                             errors.append(f"{page_url}: captcha")
                             krisha_log("CAPTCHA на странице поиска Krisha", level="warning", payload={"url": page_url})
                             return collected, errors
+                        if not detail_urls and not empty_results:
+                            errors.append(f"{page_url}: incomplete_search_page")
+                            krisha_log(
+                                "Страница поиска Krisha не отдала карточки после ожидания",
+                                level="warning",
+                                payload={"url": page_url, "current_url": page.url},
+                            )
+                            continue
                         collected.append({"source": page_url, "text": content})
                         if krisha_collection_target_reached(payload, collected, default_country_code):
                             krisha_log("Лимит номеров Krisha достигнут на странице поиска", payload={"max_contacts": payload.max_contacts, "url": page_url})
                             return collected, errors
-                        detail_urls = krisha_detail_urls_from_text(content)
-                        krisha_log("Страница поиска Krisha обработана", payload={"url": page_url, "detail_urls": len(detail_urls)})
+                        krisha_log(
+                            "Страница поиска Krisha обработана",
+                            payload={"url": page_url, "detail_urls": len(detail_urls), "empty_results": empty_results},
+                        )
+                        if empty_results:
+                            continue
                         for detail_url in detail_urls:
                             if detail_url in seen_details:
                                 continue
                             seen_details.add(detail_url)
                             try:
                                 krisha_log("Открываю объявление Krisha", payload={"url": detail_url})
-                                await page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
-                                await page.wait_for_timeout(1000)
+                                await krisha_goto(page, detail_url, wait_until="commit", timeout=12_000, context="detail")
+                                try:
+                                    await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+                                except Exception:
+                                    pass
+                                await page.wait_for_timeout(600)
+                                if await krisha_browser_auth_prompt_visible(page) or "id.kolesa.kz" in page.url or "/login" in page.url:
+                                    if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")):
+                                        krisha_log("Krisha запросила авторизацию на карточке объявления, выполняю lazy-login", payload={"url": page.url, "detail_url": detail_url})
+                                        logged_in = await krisha_browser_login(page, context, settings, storage_state_path, errors)
+                                        if not logged_in:
+                                            krisha_log("Lazy-login Krisha на карточке объявления не завершен", level="warning", payload={"url": page.url, "errors": errors[-5:]})
+                                            return collected, errors
+                                        await krisha_goto(page, detail_url, wait_until="commit", timeout=12_000, context="detail_after_lazy_auth")
+                                        try:
+                                            await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+                                        except Exception:
+                                            pass
+                                        await page.wait_for_timeout(600)
                                 await close_krisha_popups(page, reason="detail_page_loaded")
-                                if is_captcha_page(await page.content()):
-                                    errors.append(f"{detail_url}: captcha")
-                                    krisha_log("CAPTCHA в объявлении Krisha", level="warning", payload={"url": detail_url})
-                                    return collected, errors
+                                detail_content = await krisha_detail_snapshot(page)
+                                if is_captcha_page(detail_content):
+                                    if await krisha_wait_for_manual_captcha(
+                                        page,
+                                        context,
+                                        storage_state_path,
+                                        stage="detail_page",
+                                        timeout_seconds=180 if not headless else 0,
+                                        settings=settings,
+                                    ):
+                                        await page.wait_for_timeout(500)
+                                        detail_content = await krisha_detail_snapshot(page)
+                                    else:
+                                        errors.append(f"{detail_url}: captcha")
+                                        krisha_log("CAPTCHA в объявлении Krisha", level="warning", payload={"url": detail_url})
+                                        return collected, errors
+
+                                ajax_phones, ajax_error = await fetch_krisha_ajax_phones(context, detail_url, detail_content)
+                                if ajax_error == "captcha":
+                                    krisha_log(
+                                        "AJAX-показ телефона запросил CAPTCHA, пробую сценарий через клик по кнопке с решением капчи",
+                                        level="warning",
+                                        payload={"url": detail_url, "headless": headless},
+                                    )
+                                if ajax_phones:
+                                    collected.append({"source": detail_url, "text": f"{detail_content}\n{ajax_phones}"})
+                                    if krisha_collection_target_reached(payload, collected, default_country_code):
+                                        krisha_log("Лимит номеров Krisha достигнут через AJAX", payload={"max_contacts": payload.max_contacts, "url": detail_url})
+                                        return collected, errors
+                                    continue
 
                                 clicked_phone = await click_krisha_phone_button(page, detail_url)
+                                phone_revealed = False
+                                phone_captcha_visible = False
                                 if clicked_phone:
-                                    await page.wait_for_timeout(2200)
+                                    detail_content, phone_revealed, phone_captcha_visible = await krisha_wait_for_phone_reveal(
+                                        page,
+                                        payload,
+                                        default_country_code,
+                                        detail_url,
+                                    )
                                     if await krisha_browser_auth_prompt_visible(page):
                                         if safe_cell(settings.get("krisha_login")) and safe_cell(settings.get("krisha_password")):
                                             krisha_log("Krisha запросила авторизацию при показе телефона", payload={"url": detail_url})
@@ -2070,18 +4409,87 @@ async def collect_krisha_sources_browser(
                                             if not logged_in:
                                                 krisha_log("Авторизация на показе телефона не завершена", level="warning", payload={"url": detail_url, "errors": errors[-5:]})
                                                 return collected, errors
-                                            await page.goto(detail_url, wait_until="domcontentloaded", timeout=45_000)
-                                            await page.wait_for_timeout(800)
+                                            await krisha_goto(page, detail_url, wait_until="commit", timeout=12_000, context="detail_after_auth")
+                                            try:
+                                                await page.wait_for_load_state("domcontentloaded", timeout=3_000)
+                                            except Exception:
+                                                pass
+                                            await page.wait_for_timeout(600)
                                             await close_krisha_popups(page, reason="after_auth_return_to_detail")
                                             if await click_krisha_phone_button(page, detail_url):
-                                                await page.wait_for_timeout(2200)
+                                                detail_content, phone_revealed, phone_captcha_visible = await krisha_wait_for_phone_reveal(
+                                                    page,
+                                                    payload,
+                                                    default_country_code,
+                                                    detail_url,
+                                                )
                                         else:
                                             errors.append(f"{detail_url}: auth_required")
                                             krisha_log("Для показа телефона нужна авторизация Krisha", level="warning", payload={"url": detail_url})
                                 else:
                                     krisha_log("Кнопка показа телефона не найдена в объявлении", level="warning", payload={"url": detail_url})
 
-                                detail_content = await page.content()
+                                if phone_revealed:
+                                    collected.append({"source": detail_url, "text": detail_content})
+                                    if krisha_collection_target_reached(payload, collected, default_country_code):
+                                        krisha_log("Лимит номеров Krisha достигнут после показа номера", payload={"max_contacts": payload.max_contacts, "url": detail_url})
+                                        return collected, errors
+                                    continue
+
+                                if not detail_content:
+                                    detail_content = await krisha_detail_snapshot(page)
+                                if phone_captcha_visible or is_captcha_page(detail_content):
+                                    if await krisha_wait_for_manual_captcha(
+                                        page,
+                                        context,
+                                        storage_state_path,
+                                        stage="after_phone_click",
+                                        timeout_seconds=180 if not headless else 0,
+                                        settings=settings,
+                                    ):
+                                        await close_krisha_popups(page, reason="after_manual_captcha")
+                                        detail_content = await krisha_detail_snapshot(page)
+                                        ajax_phones, ajax_error = await fetch_krisha_ajax_phones(context, detail_url, detail_content)
+                                        if ajax_phones:
+                                            collected.append({"source": detail_url, "text": f"{detail_content}\n{ajax_phones}"})
+                                            if krisha_collection_target_reached(payload, collected, default_country_code):
+                                                krisha_log("Лимит номеров Krisha достигнут после ручной CAPTCHA", payload={"max_contacts": payload.max_contacts, "url": detail_url})
+                                                return collected, errors
+                                            continue
+                                        if await click_krisha_phone_button(page, detail_url):
+                                            detail_content, phone_revealed, phone_captcha_visible = await krisha_wait_for_phone_reveal(
+                                                page,
+                                                payload,
+                                                default_country_code,
+                                                detail_url,
+                                                attempts=3,
+                                            )
+                                            if phone_revealed:
+                                                collected.append({"source": detail_url, "text": detail_content})
+                                                if krisha_collection_target_reached(payload, collected, default_country_code):
+                                                    krisha_log("Лимит номеров Krisha достигнут после CAPTCHA", payload={"max_contacts": payload.max_contacts, "url": detail_url})
+                                                    return collected, errors
+                                                continue
+                                    else:
+                                        errors.append(f"{detail_url}: captcha")
+                                        krisha_log("CAPTCHA после показа телефона", level="warning", payload={"url": detail_url})
+                                        return collected, errors
+                                if ajax_error == "captcha" and not clicked_phone:
+                                    errors.append(f"{detail_url}: captcha")
+                                    krisha_log(
+                                        "Krisha запросила CAPTCHA через AJAX, а кнопка показа телефона не найдена",
+                                        level="warning",
+                                        payload={"url": detail_url},
+                                    )
+                                    return collected, errors
+                                if ajax_error == "captcha" and clicked_phone and not phone_revealed:
+                                    errors.append(f"{detail_url}: captcha")
+                                    krisha_log(
+                                        "Krisha не раскрыла телефон после AJAX CAPTCHA и клика по кнопке",
+                                        level="warning",
+                                        payload={"url": detail_url},
+                                    )
+                                    return collected, errors
                                 if is_captcha_page(detail_content):
                                     errors.append(f"{detail_url}: captcha")
                                     krisha_log("CAPTCHA после показа телефона", level="warning", payload={"url": detail_url})
@@ -2118,11 +4526,16 @@ async def collect_krisha_source_texts(
     should_fetch = bool(urls) or not source_text.strip()
     if should_fetch:
         if is_truthy(resolved_settings.get("krisha_use_browser")):
-            collected, errors = await collect_krisha_sources_browser(payload, urls, resolved_settings)
+            engine = krisha_browser_engine(resolved_settings)
+            if engine == "selenium_undetected":
+                collected, errors = await collect_krisha_sources_selenium_undetected(payload, urls, resolved_settings)
+            else:
+                collected, errors = await collect_krisha_sources_browser(payload, urls, resolved_settings)
             blocking_browser_error = any(
                 "captcha" in error.lower()
                 or "auth" in error.lower()
                 or error.lower().startswith("login:")
+                or "selenium_browser" in error.lower()
                 for error in errors
             )
             if not collected and not blocking_browser_error:
@@ -2177,6 +4590,47 @@ def krisha_has_auth_error(errors: list[str]) -> bool:
     )
 
 
+def should_preserve_krisha_reimport(existing: sqlite3.Row | dict[str, Any] | None) -> bool:
+    if not existing:
+        return False
+    status = str(existing["status"] or "")
+    if int(existing["proposal_sent"] or 0):
+        return True
+    if existing["last_inbound_at"]:
+        return True
+    return status in {
+        "sent",
+        "replied",
+        "replied_after_proposal",
+        "proposal_sending",
+        "proposal_sent",
+        "interested",
+        "interested_pending",
+        "opt_out",
+        "not_interested",
+        "lpr_self",
+    }
+
+
+def update_existing_krisha_context(contact_id: int, lead: dict[str, Any], payload: KrishaImportRequest) -> None:
+    current_time = now_iso()
+    meta_json = json.dumps(krisha_contact_meta(lead, payload), ensure_ascii=False)
+    with db_conn() as conn:
+        conn.execute(
+            """
+            UPDATE contacts
+            SET phone_raw = COALESCE(?, phone_raw),
+                source = 'krisha',
+                company = COALESCE(?, company),
+                meta_json = ?,
+                last_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (lead.get("phone_raw"), lead.get("title") or "Владелец коммерческой недвижимости", meta_json, current_time, contact_id),
+        )
+
+
 def save_krisha_leads(leads: list[dict[str, Any]], payload: KrishaImportRequest, project_id: int | None = None) -> tuple[int, int]:
     imported = 0
     updated = 0
@@ -2184,10 +4638,14 @@ def save_krisha_leads(leads: list[dict[str, Any]], payload: KrishaImportRequest,
     for lead in leads:
         with db_conn() as conn:
             existing = conn.execute(
-                "SELECT id FROM contacts WHERE project_id = ? AND phone = ?",
+                "SELECT * FROM contacts WHERE project_id = ? AND phone = ? ORDER BY CASE WHEN kind = 'lpr' THEN 0 ELSE 1 END LIMIT 1",
                 (resolved_project_id, lead["phone"]),
             ).fetchone()
-        create_or_update_contact(
+        if existing and (existing["kind"] != "lead" or should_preserve_krisha_reimport(existing)):
+            update_existing_krisha_context(int(existing["id"]), lead, payload)
+            updated += 1
+            continue
+        contact = create_or_update_contact(
             phone=lead["phone"],
             kind="lead",
             source="krisha",
@@ -2199,6 +4657,7 @@ def save_krisha_leads(leads: list[dict[str, Any]], payload: KrishaImportRequest,
             stage="imported",
             meta=krisha_contact_meta(lead, payload),
         )
+        update_contact_fields(contact["id"], whatsapp_exists=None, status="new", stage="imported", last_error=None)
         if existing:
             updated += 1
         else:
@@ -2211,10 +4670,13 @@ async def run_krisha_import_cycle(
     *,
     project_id: int | None = None,
     start_whatsapp_check: bool = True,
+    settings_override: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolved_project_id = int(project_id or current_project_id())
     with use_project(resolved_project_id):
         settings = get_settings()
+        if settings_override:
+            settings = {**settings, **settings_override}
         sources, source_errors = await collect_krisha_source_texts(payload, settings)
         leads: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -2494,6 +4956,78 @@ def buyer_confusion_reply(contact: dict[str, Any]) -> str:
     )
 
 
+def short_topic_clarification_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="clarified_offer")
+    if uses_keramo_investor_flow():
+        return (
+            "Речь не про аренду или покупку помещения, а про инвестиции в KERAMO BUILD: производство керамогранита в Астане. "
+            "Если тема в целом уместна, могу коротко скинуть цифры."
+        )
+    return (
+        "Да, по автонаправлению, но мы не выдаем кредит. Речь про приложение для автодилера: заявка клиента, предварительный скоринг и кабинет для менеджера."
+    )
+
+
+def responsible_exists_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="awaiting_responsible_contact")
+    if uses_keramo_investor_flow():
+        return "Понял. Тогда пришлите, пожалуйста, WhatsApp или номер человека, кто смотрит инвестиции или партнерства."
+    return "Понял. Тогда пришлите, пожалуйста, WhatsApp или номер человека, кто отвечает за кредитные продажи или цифровые продукты."
+
+
+def looks_like_retail_customer_reply(contact: dict[str, Any], inbound_text: str | None) -> bool:
+    if not uses_autoscore_warmup_flow():
+        return False
+    text = re.sub(r"\s+", " ", str(inbound_text or "")).strip()
+    if not text or len(text) > 90:
+        return False
+    stage = str(contact.get("stage") or "")
+    if stage not in {"warmup_permission", "warmup_credit_check", "warmup_intro", "clarified_offer", "replied"}:
+        return False
+    if any(pattern.search(text) for pattern in (IDENTITY_QUESTION_RE, SELF_LPR_RE, INTEREST_RE, PROPOSAL_REQUEST_RE)):
+        return False
+    if re.search(r"\b(прода[её]м|салон|дилер|менеджер|отдел|клиент\w*|заявк\w*|скоринг)\b", text, re.IGNORECASE):
+        return False
+    return bool(RETAIL_CUSTOMER_REPLY_RE.search(text))
+
+
+def retail_customer_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="not_interested", stage="closed_retail_customer")
+    return "Понял, похоже, я попал не по адресу: мы не продаем авто и не оформляем кредит клиентам. Не буду отвлекать."
+
+
+def should_block_forced_proposal(contact: dict[str, Any], inbound_text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(inbound_text or "")).strip()
+    if not normalized:
+        return True
+    if "?" in normalized:
+        return True
+    if extract_phones(normalized):
+        return True
+    if any(
+        pattern.search(normalized)
+        for pattern in (
+            GREETING_ONLY_RE,
+            CONFUSION_RE,
+            SHORT_TOPIC_CLARIFICATION_RE,
+            DETAIL_REQUEST_RE,
+            ACTION_REQUEST_RE,
+            BUYER_CONFUSION_RE,
+            OPT_OUT_RE,
+            SOFT_NEGATIVE_RE,
+            BUSINESS_CLOSED_RE,
+            EMAIL_REQUEST_RE,
+            IDENTITY_QUESTION_RE,
+        )
+    ):
+        return True
+    if HAS_RESPONSIBLE_SHORT_RE.search(normalized) and last_outbound_asked_for_decision_maker(contact["id"]):
+        return True
+    if looks_like_retail_customer_reply(contact, normalized):
+        return True
+    return False
+
+
 def detail_request_reply(contact: dict[str, Any]) -> str:
     project = get_project()
     if is_active_interest_contact(contact):
@@ -2520,8 +5054,8 @@ def detail_request_reply(contact: dict[str, Any]) -> str:
 def interested_reply_text(contact: dict[str, Any], inbound_text: str) -> str:
     if uses_keramo_investor_flow():
         if MEETING_INTEREST_RE.search(inbound_text or ""):
-            return "Да, можно. Чтобы предметно обсудить, какой формат удобнее: сначала короткое КП с цифрами или сразу 15-минутный созвон?"
-        return "Отлично. Чтобы понять релевантность, вам комфортно рассматривать инвестиционный чек 35 млн тенге или лучше сначала отправить КП с моделью возврата?"
+            return "Да, можно. Чтобы созвон был предметным, сначала пришлю короткое КП с цифрами сюда в WhatsApp?"
+        return "Отлично. Если удобно, пришлю короткое КП с цифрами сюда в WhatsApp?"
     if MEETING_INTEREST_RE.search(inbound_text or ""):
         return (
             "Отлично. Чтобы созвон был предметным, что для вас сейчас важнее: больше заявок на автокредит "
@@ -2537,11 +5071,63 @@ def is_active_interest_contact(contact: dict[str, Any]) -> bool:
     return contact.get("status") in {"interested", "interested_pending"} or contact.get("stage") in {"interest_dialog", "handoff"}
 
 
-def meeting_schedule_reply(contact: dict[str, Any]) -> str:
+def callback_time_hint(text: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not normalized:
+        return ""
+    if "сегодня" in normalized and "после обеда" in normalized:
+        return "сегодня после обеда"
+    if "завтра" in normalized and "после обеда" in normalized:
+        return "завтра после обеда"
+    if "сегодня" in normalized:
+        return "сегодня"
+    if "завтра" in normalized:
+        return "завтра"
+    if "после обеда" in normalized:
+        return "после обеда"
+    time_match = re.search(r"\b(\d{1,2}[:.]\d{2}|\d{1,2}\s*(?:час(?:а|ов)?|ч))\b", normalized)
+    return time_match.group(1) if time_match else ""
+
+
+def meeting_schedule_reply(contact: dict[str, Any], inbound_text: str | None = None) -> str:
     update_contact_fields(contact["id"], status="interested", stage="interest_dialog")
+    time_hint = callback_time_hint(inbound_text)
+    if time_hint:
+        if uses_keramo_investor_flow():
+            return f"Понял, передам коллеге по KERAMO BUILD: {time_hint} он свяжется напрямую."
+        return f"Понял, передам коллеге: {time_hint} он свяжется напрямую."
     if uses_keramo_investor_flow():
-        return "Да, можно. Какой слот вам удобнее завтра: до обеда или после? На созвоне коротко пройдемся по 35 млн, возврату и доле 30%."
-    return "Да, можно. Какой слот вам удобнее завтра: до обеда или после?"
+        return "Да, можно. Передам коллеге для короткого созвона. Удобнее сегодня или завтра?"
+    return "Да, можно. Передам коллеге для короткого созвона. Удобнее сегодня или завтра?"
+
+
+def business_closed_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="not_interested", stage="closed_no_interest")
+    return "Понял, спасибо за ответ. Тогда не буду отвлекать."
+
+
+def custom_development_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="interested", stage="handoff")
+    if uses_keramo_investor_flow():
+        return "Понял. Это уже лучше обсудить напрямую с коллегой по KERAMO BUILD, передам ему ваш вопрос."
+    return "Да, можем обсудить отдельную разработку. Передам специалисту, он свяжется и разберет задачу предметно."
+
+
+def callback_confirmation_reply(contact: dict[str, Any], inbound_text: str | None = None) -> str:
+    update_contact_fields(contact["id"], status="interested", stage="handoff")
+    time_hint = callback_time_hint(inbound_text)
+    if uses_keramo_investor_flow():
+        if time_hint:
+            return f"Понял, передаю коллеге по KERAMO BUILD: {time_hint} свяжемся напрямую."
+        return "Понял, передам коллеге по KERAMO BUILD, чтобы он связался напрямую."
+    if time_hint:
+        return f"Понял, передаю коллеге: {time_hint} свяжемся напрямую."
+    return "Понял, передам коллеге, чтобы он связался с вами напрямую."
+
+
+def keramo_ambiguous_reaction_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="awaiting_interest_confirmation")
+    return "Понимаю, тема нестандартная. Если интересно, могу отправить короткое КП с цифрами."
 
 
 def our_callback_contact_reply(contact: dict[str, Any]) -> str:
@@ -2575,6 +5161,15 @@ def asks_to_leave_our_contact(text: str | None) -> bool:
     if EMAIL_REQUEST_RE.search(normalized) or PROPOSAL_REQUEST_RE.search(normalized):
         return False
     return bool(REQUEST_OUR_CONTACT_RE.search(normalized) or FORWARDED_TO_INTERNAL_TEAM_RE.search(normalized))
+
+
+def asks_for_live_callback(text: str | None) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    if EMAIL_REQUEST_RE.search(normalized) or PROPOSAL_REQUEST_RE.search(normalized):
+        return False
+    return bool(LIVE_CALLBACK_REQUEST_RE.search(normalized))
 
 
 def offers_specialist_contact(text: str | None) -> bool:
@@ -2612,12 +5207,22 @@ def has_explicit_proposal_request(text: str | None) -> bool:
 
 
 def is_waiting_proposal_consent(contact: dict[str, Any]) -> bool:
-    if contact.get("kind") != "lpr" or contact.get("status") != "lpr_self" or int(contact.get("proposal_sent") or 0):
+    if int(contact.get("proposal_sent") or 0):
+        return False
+    stage = str(contact.get("stage") or "")
+    status = str(contact.get("status") or "")
+    if status in {"opt_out", "not_interested"}:
         return False
     history = load_message_history(contact["id"], limit=3)
     last_outbound = next((item.get("text") or "" for item in reversed(history) if item.get("direction") == "out"), "")
     last_outbound_normalized = re.sub(r"\s+", " ", last_outbound).strip().lower()
-    return "пришлю короткое кп сюда" in last_outbound_normalized or "коммерческ" in last_outbound_normalized
+    if not PROPOSAL_OFFER_PENDING_RE.search(last_outbound_normalized):
+        return False
+    if stage in {"self_lpr", "lpr_self", "interest_dialog", "awaiting_interest_confirmation", "waiting_reply"}:
+        return True
+    if status in {"lpr_self", "interested_pending", "replied", "sent"}:
+        return True
+    return uses_keramo_investor_flow()
 
 
 def has_proposal_consent_reply(contact: dict[str, Any], text: str | None) -> bool:
@@ -2639,7 +5244,7 @@ def local_reply_intent_fallback(contact: dict[str, Any], inbound_text: str) -> d
     forward_summary_consent = has_forward_summary_consent(contact, text)
     answers_qualification_focus = is_qualification_focus_answer(contact, text)
     specialist_contact_offer = offers_specialist_contact(text)
-    callback_contact_request = asks_to_leave_our_contact(text)
+    callback_contact_request = asks_to_leave_our_contact(text) or asks_for_live_callback(text)
     meeting_interest = bool(MEETING_INTEREST_RE.search(text)) and not specialist_contact_offer and not callback_contact_request
     interested_next_step = is_interested_text(text) and not specialist_contact_offer and not callback_contact_request
     return {
@@ -2720,7 +5325,7 @@ async def classify_reply_intent(settings: dict[str, str], contact: dict[str, Any
     merged = {key: bool(parsed.get(key)) or fallback.get(key, False) for key in fallback}
     if merged.get("forward_summary_consent") or merged.get("answers_qualification_focus"):
         merged["terminal_ack"] = False
-    if offers_specialist_contact(inbound_text) or asks_to_leave_our_contact(inbound_text):
+    if offers_specialist_contact(inbound_text) or asks_to_leave_our_contact(inbound_text) or asks_for_live_callback(inbound_text):
         merged["meeting_interest"] = False
         merged["interested_next_step"] = False
     if CANNOT_ACCEPT_PROPOSAL_RE.search(inbound_text or ""):
@@ -3117,6 +5722,32 @@ def message_exists(direction: str, channel_msg_id: str | None) -> bool:
             (current_project_id(), direction, channel_msg_id),
         ).fetchone()
     return row is not None
+
+
+def has_newer_inbound_message(contact_id: int, channel_msg_id: str | None) -> bool:
+    if not channel_msg_id:
+        return False
+    with db_conn() as conn:
+        current = conn.execute(
+            """
+            SELECT id FROM messages
+            WHERE project_id = ? AND contact_id = ? AND direction = 'in' AND channel_msg_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (current_project_id(), contact_id, channel_msg_id),
+        ).fetchone()
+        if not current:
+            return False
+        newer = conn.execute(
+            """
+            SELECT 1 FROM messages
+            WHERE project_id = ? AND contact_id = ? AND direction = 'in' AND id > ?
+            LIMIT 1
+            """,
+            (current_project_id(), contact_id, int(current["id"])),
+        ).fetchone()
+    return newer is not None
 
 
 def get_contact_by_chat(chat_id: str) -> dict[str, Any] | None:
@@ -3791,6 +6422,7 @@ async def call_ai(settings: dict[str, str], contact: dict[str, Any], inbound_tex
         "Если клиент пишет, что не может принимать коммерческие предложения, но может дать контакты специалиста, попроси номер или WhatsApp специалиста; не трактуй это как интерес к встрече или просьбу прислать КП. "
         "Если сообщение пришло как ответ на цитату, учитывай и сам текст клиента, и процитированное сообщение; не игнорируй короткие ответы вроде 'да есть' или 'на этот номер'. "
         "Если клиент спрашивает, что именно от него требуется, ответь одним конкретным micro-CTA, а не общим повтором про ответственного. "
+        "Короткие уточняющие вопросы вроде 'что надо?', 'авто?', 'в кредит?', 'какой кредит?' не являются согласием на КП; сначала коротко проясни тему. "
         "Если клиент проявил интерес, не спеши завершать диалог благодарностью и мгновенным handoff: сначала задай один полезный квалифицирующий или next-step вопрос. "
         "Если контакт ответственного передали, сначала начни короткий диалог с ним и проверь релевантность; не отправляй КП автоматически в первом же сообщении. "
         "Если клиент просто поздоровался в середине диалога, не здоровайся второй раз, а мягко продолжи разговор. "
@@ -4015,6 +6647,13 @@ def fallback_reply(contact: dict[str, Any], inbound_text: str) -> dict[str, Any]
                 "stage": "continue",
             }
         )
+    if SHORT_TOPIC_CLARIFICATION_RE.search(inbound_text):
+        return normalize_ai_action(
+            {
+                "reply": short_topic_clarification_reply(contact),
+                "stage": "continue",
+            }
+        )
     if DETAIL_REQUEST_RE.search(inbound_text):
         return normalize_ai_action(
             {
@@ -4026,12 +6665,20 @@ def fallback_reply(contact: dict[str, Any], inbound_text: str) -> dict[str, Any]
         return normalize_ai_action({"reply": transfer_offer_reply(contact), "stage": "continue"})
     if ACTION_REQUEST_RE.search(inbound_text):
         return normalize_ai_action({"reply": action_request_reply(contact), "stage": "continue"})
+    if HAS_RESPONSIBLE_SHORT_RE.search(inbound_text) and last_outbound_asked_for_decision_maker(contact["id"]):
+        return normalize_ai_action({"reply": responsible_exists_reply(contact), "stage": "continue"})
+    if looks_like_retail_customer_reply(contact, inbound_text):
+        return normalize_ai_action({"reply": retail_customer_reply(contact), "stage": "not_interested"})
     if BUYER_CONFUSION_RE.search(inbound_text):
         return normalize_ai_action({"reply": buyer_confusion_reply(contact), "stage": "continue"})
     if OPT_OUT_RE.search(inbound_text):
         return normalize_ai_action(
             {"reply": "Понял, больше не будем беспокоить. Спасибо.", "stage": "stop", "stop": True}
         )
+    if BUSINESS_CLOSED_RE.search(inbound_text):
+        return normalize_ai_action({"reply": business_closed_reply(contact), "stage": "not_interested"})
+    if CUSTOM_DEVELOPMENT_RE.search(inbound_text):
+        return normalize_ai_action({"reply": custom_development_reply(contact), "stage": "handoff", "interested": True})
     if SOFT_NEGATIVE_RE.search(inbound_text):
         return normalize_ai_action({"reply": soft_negative_reply(contact), "stage": "not_interested"})
     if BUDGET_OBJECTION_RE.search(inbound_text):
@@ -4040,6 +6687,8 @@ def fallback_reply(contact: dict[str, Any], inbound_text: str) -> dict[str, Any]
         return normalize_ai_action({"reply": existing_solution_reply(contact), "stage": "existing_solution_objection"})
     if asks_to_leave_our_contact(inbound_text):
         return normalize_ai_action({"reply": our_callback_contact_reply(contact), "stage": "handoff", "interested": True})
+    if asks_for_live_callback(inbound_text):
+        return normalize_ai_action({"reply": callback_confirmation_reply(contact, inbound_text), "stage": "handoff", "interested": True})
     if offers_specialist_contact(inbound_text):
         return normalize_ai_action({"reply": specialist_contact_request_reply(contact), "stage": "continue"})
     if SELF_LPR_RE.search(inbound_text) or is_direct_self_reply(contact["id"], inbound_text):
@@ -4054,11 +6703,21 @@ def fallback_reply(contact: dict[str, Any], inbound_text: str) -> dict[str, Any]
     if is_active_interest_contact(contact) and MEETING_INTEREST_RE.search(inbound_text):
         return normalize_ai_action(
             {
-                "reply": meeting_schedule_reply(contact),
+                "reply": meeting_schedule_reply(contact, inbound_text),
                 "stage": "interested",
                 "interested": True,
             }
         )
+    if is_active_interest_contact(contact) and CALLBACK_TIME_RE.search(inbound_text) and not MEETING_INTEREST_RE.search(inbound_text):
+        return normalize_ai_action(
+            {
+                "reply": callback_confirmation_reply(contact, inbound_text),
+                "stage": "handoff",
+                "interested": True,
+            }
+        )
+    if uses_keramo_investor_flow() and not int(contact.get("proposal_sent") or 0) and AMBIGUOUS_REACTION_RE.match(inbound_text):
+        return normalize_ai_action({"reply": keramo_ambiguous_reaction_reply(contact), "stage": "continue"})
     if is_interested_text(inbound_text):
         return normalize_ai_action(
             {
@@ -4124,7 +6783,11 @@ def fallback_reply(contact: dict[str, Any], inbound_text: str) -> dict[str, Any]
         )
     attempts = int(contact.get("attempts") or 0)
     max_attempts = int(settings.get("max_lpr_attempts") or 4)
-    if is_truthy(settings.get("send_proposal_after_failed_attempts")) and attempts >= max_attempts:
+    if (
+        is_truthy(settings.get("send_proposal_after_failed_attempts"))
+        and attempts >= max_attempts
+        and not should_block_forced_proposal(contact, inbound_text)
+    ):
         if uses_keramo_investor_flow():
             return normalize_ai_action(
                 {
@@ -4468,9 +7131,23 @@ async def handle_pending_proposal_consent(contact: dict[str, Any], inbound_text:
 
 
 async def handle_after_proposal_contact(contact: dict[str, Any], inbound_text: str, settings: dict[str, str]) -> None:
+    if BUSINESS_CLOSED_RE.search(inbound_text):
+        await send_and_log(contact, business_closed_reply(contact))
+        return
+
+    if CUSTOM_DEVELOPMENT_RE.search(inbound_text):
+        await send_and_log(contact, custom_development_reply(contact))
+        await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "after_proposal_custom_development")
+        return
+
     if asks_to_leave_our_contact(inbound_text):
         await send_and_log(contact, our_callback_contact_reply(contact))
         await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "after_proposal_callback_contact_requested")
+        return
+
+    if asks_for_live_callback(inbound_text):
+        await send_and_log(contact, callback_confirmation_reply(contact, inbound_text))
+        await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "after_proposal_live_callback")
         return
 
     if offers_specialist_contact(inbound_text):
@@ -4519,8 +7196,13 @@ async def handle_after_proposal_contact(contact: dict[str, Any], inbound_text: s
         return
 
     if intent.get("meeting_interest"):
-        await send_and_log(contact, meeting_schedule_reply(contact))
+        await send_and_log(contact, meeting_schedule_reply(contact, inbound_text))
         await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "after_proposal_intent")
+        return
+
+    if is_active_interest_contact(contact) and CALLBACK_TIME_RE.search(inbound_text) and not MEETING_INTEREST_RE.search(inbound_text):
+        await send_and_log(contact, callback_confirmation_reply(contact, inbound_text))
+        await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "after_proposal_callback_time")
         return
 
     if intent.get("asks_details"):
@@ -4631,6 +7313,9 @@ def extract_name_near_phone(text: str, phone: str) -> str | None:
         "лпр",
         "директор",
         "руководитель",
+        "менеджер",
+        "специалист",
+        "ответственный",
         "можно",
         "можете",
         "можешь",
@@ -4653,6 +7338,38 @@ def extract_name_near_phone(text: str, phone: str) -> str | None:
         return clean_person_name(" ".join(useful))
     if len(useful) > 3:
         return clean_person_name(" ".join(useful[-3:]))
+    return None
+
+
+def person_name_hint_from_text(text: str | None) -> str | None:
+    raw = safe_cell(text)
+    if not raw:
+        return None
+    titled = re.search(
+        r"\b(?:менеджер|руководитель|директор|ответственный|специалист)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,24}(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,24}){0,2})",
+        raw,
+        re.IGNORECASE,
+    )
+    if titled:
+        return clean_person_name(titled.group(1))
+    declared = re.search(
+        r"\b(?:его|ее|её)?\s*(?:имя|зовут|это)\s*[:\-]?\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,24}(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{1,24}){0,2})",
+        raw,
+        re.IGNORECASE,
+    )
+    if declared:
+        return clean_person_name(declared.group(1))
+    return None
+
+
+def recent_lpr_name_hint(owner_contact_id: int) -> str | None:
+    history = load_message_history(owner_contact_id, limit=8)
+    for item in reversed(history[:-1]):
+        if item.get("direction") != "in":
+            continue
+        name = person_name_hint_from_text(history_item_content(item))
+        if name:
+            return name
     return None
 
 
@@ -4864,10 +7581,10 @@ async def handle_lpr_candidate(owner: dict[str, Any], candidate: dict[str, Any])
         owner_lpr = mark_contact_as_lpr(owner, "same_phone_candidate", candidate.get("name"))
         await send_and_log(owner_lpr, proposal_offer_reply())
         return
-    name = await resolve_person_name(
+    name = person_name_hint_from_text(candidate.get("source_text")) or await resolve_person_name(
         candidate.get("name") or candidate.get("source_text"),
         context="имя ответственного рядом с полученным номером",
-    )
+    ) or recent_lpr_name_hint(owner["id"])
     owner_sales_context = contact_sales_context(owner)
     lpr = create_or_update_contact(
         phone=candidate["phone"],
@@ -4910,10 +7627,10 @@ async def remember_lpr_candidate(owner: dict[str, Any], candidate: dict[str, Any
     if candidate["phone"] == owner["phone"]:
         return mark_contact_as_lpr(owner, "same_phone_candidate_history", candidate.get("name"))
 
-    name = await resolve_person_name(
+    name = person_name_hint_from_text(candidate.get("source_text")) or await resolve_person_name(
         candidate.get("name") or candidate.get("source_text"),
         context="имя ответственного рядом с полученным номером из истории",
-    )
+    ) or recent_lpr_name_hint(owner["id"])
     owner_sales_context = contact_sales_context(owner)
     lpr = create_or_update_contact(
         phone=candidate["phone"],
@@ -5247,6 +7964,15 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
     )
     contact = get_contact(contact["id"]) or contact
 
+    if has_newer_inbound_message(contact["id"], id_message):
+        log_event(
+            "message",
+            f"Входящее от {phone} принято без ответа: есть более новое сообщение в этом же диалоге",
+            contact_id=contact["id"],
+            payload={"stage": contact.get("stage"), "status": contact.get("status"), "idMessage": id_message},
+        )
+        return
+
     if not inbound_text and message_data.get("typeMessage") not in {"contactMessage", "contactsArrayMessage"}:
         log_event(
             "message",
@@ -5265,12 +7991,50 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
     if contact["status"] == "opt_out":
         return
     if contact["status"] == "not_interested":
+        closed_candidates = extract_lpr_candidates(inbound_text, message_data)
+        if closed_candidates:
+            for candidate in closed_candidates[:3]:
+                if allow_outbound:
+                    await handle_lpr_candidate(contact, candidate)
+                else:
+                    await remember_lpr_candidate(contact, candidate)
+            return
+        if offers_specialist_contact(inbound_text) or TRANSFER_OFFER_RE.search(inbound_text):
+            update_contact_fields(contact["id"], status="replied", stage="awaiting_specialist_contact")
+            contact = get_contact(contact["id"]) or contact
+            if allow_outbound:
+                await send_and_log(contact, specialist_contact_request_reply(contact))
+            return
         log_event(
             "message",
             f"Входящее от {phone} принято без ответа: контакт уже закрыт как неактуальный",
             contact_id=contact["id"],
             payload={"stage": contact.get("stage"), "text": inbound_text},
         )
+        return
+
+    if BUSINESS_CLOSED_RE.search(inbound_text):
+        log_event("contact", f"Контакт {phone} сообщил, что направление закрыто", contact_id=contact["id"])
+        if allow_outbound:
+            await send_and_log(contact, business_closed_reply(contact))
+        else:
+            update_contact_fields(contact["id"], status="not_interested", stage="closed_no_interest")
+        return
+
+    if CUSTOM_DEVELOPMENT_RE.search(inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, custom_development_reply(contact))
+            await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "custom_development")
+        else:
+            update_contact_fields(contact["id"], status="interested_pending", stage="handoff_pending")
+            update_contact_meta(contact["id"], deferred_interest_text=inbound_text, deferred_interest_at=now_iso())
+        return
+
+    if looks_like_retail_customer_reply(contact, inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, retail_customer_reply(contact))
+        else:
+            retail_customer_reply(contact)
         return
 
     if SOFT_NEGATIVE_RE.search(inbound_text):
@@ -5301,6 +8065,15 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
             update_contact_meta(contact["id"], deferred_interest_text=inbound_text, deferred_interest_at=now_iso())
         return
 
+    if asks_for_live_callback(inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, callback_confirmation_reply(contact, inbound_text))
+            await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "live_callback_requested")
+        else:
+            update_contact_fields(contact["id"], status="interested_pending", stage="awaiting_callback")
+            update_contact_meta(contact["id"], deferred_interest_text=inbound_text, deferred_interest_at=now_iso())
+        return
+
     if offers_specialist_contact(inbound_text):
         if allow_outbound:
             await send_and_log(contact, specialist_contact_request_reply(contact))
@@ -5312,6 +8085,22 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
         if not allow_outbound:
             return
         await handle_after_proposal_contact(contact, inbound_text, settings)
+        return
+
+    if is_active_interest_contact(contact) and CALLBACK_TIME_RE.search(inbound_text) and not MEETING_INTEREST_RE.search(inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, callback_confirmation_reply(contact, inbound_text))
+            await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "callback_time")
+        else:
+            update_contact_fields(contact["id"], status="interested_pending", stage="handoff_pending")
+            update_contact_meta(contact["id"], deferred_interest_text=inbound_text, deferred_interest_at=now_iso())
+        return
+
+    if uses_keramo_investor_flow() and not int(contact.get("proposal_sent") or 0) and AMBIGUOUS_REACTION_RE.match(inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, keramo_ambiguous_reaction_reply(contact))
+        else:
+            update_contact_fields(contact["id"], status="replied", stage="awaiting_interest_confirmation")
         return
 
     if EMAIL_REQUEST_RE.search(inbound_text):
@@ -5327,6 +8116,13 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
                 "Отлично, прикреплю короткое КП. После ознакомления можем обсудить, насколько такой формат вам подходит.",
             )
             await send_proposal(get_contact(contact["id"]) or contact)
+        return
+
+    if SHORT_TOPIC_CLARIFICATION_RE.search(inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, short_topic_clarification_reply(contact))
+        else:
+            short_topic_clarification_reply(contact)
         return
 
     if BUYER_CONFUSION_RE.search(inbound_text):
@@ -5346,7 +8142,7 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
         if allow_outbound:
             await send_and_log(contact, warmup_credit_check_reply(contact))
         else:
-            warmup_credit_check_reply(contact)
+            update_contact_fields(contact["id"], status="replied", stage="warmup_permission")
         return
 
     if uses_autoscore_warmup_flow() and contact.get("stage") == "warmup_credit_check" and not IDENTITY_QUESTION_RE.search(inbound_text):
@@ -5392,6 +8188,18 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
             await contact_lpr(get_contact(pending_lpr["id"]) or pending_lpr)
         return
 
+    if pending_lpr and LINK_OR_EMPTY_NOISE_RE.search(inbound_text):
+        update_contact_fields(pending_lpr["id"], name=None, status="lpr_ready")
+        log_event(
+            "lpr",
+            f"Имя ответственного не получено, продолжаем без имени после технического сообщения: {pending_lpr['phone']}",
+            contact_id=contact["id"],
+            payload={"lpr_contact_id": pending_lpr["id"], "inbound_text": inbound_text},
+        )
+        if allow_outbound:
+            await contact_lpr(get_contact(pending_lpr["id"]) or pending_lpr)
+        return
+
     if pending_lpr and is_low_value_step_done_reply(inbound_text):
         update_contact_fields(pending_lpr["id"], name=None, status="lpr_ready")
         log_event(
@@ -5402,6 +8210,13 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
         )
         if allow_outbound:
             await contact_lpr(get_contact(pending_lpr["id"]) or pending_lpr)
+        return
+
+    if HAS_RESPONSIBLE_SHORT_RE.search(inbound_text) and last_outbound_asked_for_decision_maker(contact["id"]):
+        if allow_outbound:
+            await send_and_log(contact, responsible_exists_reply(contact))
+        else:
+            responsible_exists_reply(contact)
         return
 
     if SELF_LPR_RE.search(inbound_text) or is_direct_self_reply(contact["id"], inbound_text):
@@ -5436,7 +8251,8 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
 
     if is_active_interest_contact(contact) and MEETING_INTEREST_RE.search(inbound_text):
         if allow_outbound:
-            await send_and_log(contact, meeting_schedule_reply(contact))
+            await send_and_log(contact, meeting_schedule_reply(contact, inbound_text))
+            await notify_handoff(get_contact(contact["id"]) or contact, inbound_text, "meeting_interest")
         else:
             update_contact_fields(contact["id"], status="interested", stage="interest_dialog")
         return
@@ -5487,6 +8303,13 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
             update_contact_fields(contact["id"], status="replied", stage="awaiting_intro")
         return
 
+    if looks_like_retail_customer_reply(contact, inbound_text):
+        if allow_outbound:
+            await send_and_log(contact, retail_customer_reply(contact))
+        else:
+            retail_customer_reply(contact)
+        return
+
     if BUYER_CONFUSION_RE.search(inbound_text):
         if allow_outbound:
             await send_and_log(contact, buyer_confusion_reply(contact))
@@ -5533,8 +8356,10 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
         return
 
     meta = contact_meta(get_contact(contact["id"]) or contact)
-    if contact.get("status") == "interested_pending" and not meta.get("handoff_notified_at"):
-        await handle_interested_contact(contact, meta.get("deferred_interest_text") or inbound_text, "history_deferred_interest")
+    deferred_interest_text = str(meta.get("deferred_interest_text") or "").strip()
+    if contact.get("status") == "interested_pending" and deferred_interest_text and not meta.get("handoff_notified_at"):
+        update_contact_meta(contact["id"], deferred_interest_text="", deferred_interest_at="")
+        await handle_interested_contact(contact, deferred_interest_text, "history_deferred_interest")
         return
 
     ready_lpr = latest_lpr_ready_for_owner(contact["id"])
@@ -5633,6 +8458,7 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
         and not int(contact.get("proposal_sent") or 0)
         and is_truthy(settings.get("send_proposal_after_failed_attempts"))
         and int(contact.get("attempts") or 0) >= max_attempts
+        and not should_block_forced_proposal(contact, inbound_text)
     ):
         action["reply"] = (
             "Понял, тогда отправлю короткое КП. Если подскажете контакт ответственного, напишу уже напрямую."
@@ -5662,7 +8488,7 @@ async def check_whatsapp_worker() -> None:
             rows = conn.execute(
                 """
                 SELECT * FROM contacts
-                WHERE project_id = ? AND whatsapp_exists IS NULL AND status NOT IN ('opt_out')
+                WHERE project_id = ? AND whatsapp_exists IS NULL AND status NOT IN ('opt_out', 'krisha_stale')
                 ORDER BY id
                 """,
                 (project_id,),
@@ -5732,8 +8558,28 @@ def pick_next_campaign_contact(target_kind: str) -> dict[str, Any] | None:
 
 
 def campaign_task_is_running() -> bool:
+    return any_campaign_task_is_running()
+
+
+def campaign_task_for_project(project_id: int) -> asyncio.Task | None:
+    resolved_project_id = int(project_id)
+    task = campaign_tasks.get(resolved_project_id)
+    if task and task.done():
+        campaign_tasks.pop(resolved_project_id, None)
+        return None
+    return task
+
+
+def any_campaign_task_is_running() -> bool:
+    for project_id in list(campaign_tasks):
+        if campaign_task_for_project(project_id):
+            return True
     task = runtime_tasks.get("campaign")
     return bool(task and not task.done())
+
+
+def campaign_task_is_running_for_project(project_id: int) -> bool:
+    return bool(campaign_task_for_project(project_id))
 
 
 def validate_campaign_config(
@@ -5798,12 +8644,18 @@ def create_campaign_record(
 
 
 def start_campaign_task(campaign_id: int, project_id: int) -> None:
-    runtime_tasks["campaign"] = asyncio.create_task(campaign_worker(campaign_id))
+    resolved_project_id = int(project_id)
+    task = campaign_task_for_project(resolved_project_id)
+    if task and not task.done():
+        return
+    task = asyncio.create_task(campaign_worker(campaign_id))
+    campaign_tasks[resolved_project_id] = task
+    runtime_tasks["campaign"] = task
     runtime_state["campaign"] = {
         "status": "running",
         "campaign_id": campaign_id,
         "last_error": None,
-        "project_id": project_id,
+        "project_id": resolved_project_id,
     }
 
 
@@ -5873,15 +8725,19 @@ def parse_auto_campaign_time(value: str | None) -> dt_time:
     return dt_time(hour=hour, minute=minute)
 
 
-def auto_campaign_due(
-    settings: dict[str, str],
-    now_utc: datetime | None = None,
-) -> tuple[bool, str, datetime, str]:
-    tz_name = (settings.get("auto_campaign_timezone") or "Asia/Qyzylorda").strip() or "Asia/Qyzylorda"
+def auto_campaign_timezone(settings: dict[str, str]) -> ZoneInfo:
+    tz_name = (settings.get("auto_campaign_timezone") or ASTANA_TIMEZONE).strip() or ASTANA_TIMEZONE
     try:
-        tz = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except Exception as exc:
         raise ValueError(f"Некорректный часовой пояс автоработы: {tz_name}") from exc
+
+
+def auto_campaign_timing(
+    settings: dict[str, str],
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    tz = auto_campaign_timezone(settings)
     now_value = now_utc or datetime.now(timezone.utc)
     if now_value.tzinfo is None:
         now_value = now_value.replace(tzinfo=timezone.utc)
@@ -5889,11 +8745,138 @@ def auto_campaign_due(
     date_key = local_now.date().isoformat()
     run_time = parse_auto_campaign_time(settings.get("auto_campaign_time"))
     scheduled_at = datetime.combine(local_now.date(), run_time, tzinfo=tz)
-    if settings.get("auto_campaign_last_run_date") == date_key:
+    last_run_date = settings.get("auto_campaign_last_run_date") or ""
+    if local_now < scheduled_at and last_run_date != date_key:
+        next_scheduled_at = scheduled_at
+    else:
+        next_scheduled_at = scheduled_at + timedelta(days=1)
+    return {
+        "timezone": str(tz.key),
+        "server_now_utc": now_value.astimezone(timezone.utc).isoformat(),
+        "local_now": local_now.isoformat(),
+        "date_key": date_key,
+        "scheduled_at": scheduled_at.isoformat(),
+        "next_scheduled_at": next_scheduled_at.isoformat(),
+    }
+
+
+def auto_campaign_due(
+    settings: dict[str, str],
+    now_utc: datetime | None = None,
+    *,
+    ignore_last_run: bool = False,
+) -> tuple[bool, str, datetime, str]:
+    tz = auto_campaign_timezone(settings)
+    now_value = now_utc or datetime.now(timezone.utc)
+    if now_value.tzinfo is None:
+        now_value = now_value.replace(tzinfo=timezone.utc)
+    local_now = now_value.astimezone(tz)
+    date_key = local_now.date().isoformat()
+    run_time = parse_auto_campaign_time(settings.get("auto_campaign_time"))
+    scheduled_at = datetime.combine(local_now.date(), run_time, tzinfo=tz)
+    if not ignore_last_run and settings.get("auto_campaign_last_run_date") == date_key:
         return False, date_key, scheduled_at, "already_ran"
     if local_now < scheduled_at:
         return False, date_key, scheduled_at, "too_early"
     return True, date_key, scheduled_at, "due"
+
+
+def auto_work_runtime_for_project(project_id: int, settings: dict[str, str]) -> dict[str, Any]:
+    state = dict(runtime_state.get("auto_work") or {})
+    try:
+        timing = auto_campaign_timing(settings)
+    except ValueError as exc:
+        timing = {
+            "timezone": settings.get("auto_campaign_timezone") or ASTANA_TIMEZONE,
+            "server_now_utc": datetime.now(timezone.utc).isoformat(),
+            "local_now": None,
+            "scheduled_at": None,
+            "next_scheduled_at": None,
+            "time_error": str(exc),
+        }
+    scheduler_task = runtime_tasks.get("auto_work")
+    state.update(timing)
+    state["scheduler_running"] = bool(scheduler_task and not scheduler_task.done())
+    state["project_id"] = int(project_id)
+    state["enabled"] = is_truthy(settings.get("auto_campaign_enabled"))
+    return state
+
+
+def campaign_runtime_for_project(project_id: int, campaign: sqlite3.Row | dict[str, Any] | None = None) -> dict[str, Any]:
+    project_id = int(project_id)
+    current_state = runtime_state.get("campaign") or {}
+    state = dict(current_state) if int(current_state.get("project_id") or 0) == project_id else {}
+    campaign_dict = row_dict(campaign) if isinstance(campaign, sqlite3.Row) else (dict(campaign) if campaign else None)
+    task_running = campaign_task_is_running_for_project(project_id)
+    if campaign_dict:
+        state.update(
+            {
+                "status": campaign_dict.get("status") or state.get("status") or "idle",
+                "campaign_id": campaign_dict.get("id"),
+                "sent_count": campaign_dict.get("sent_count"),
+                "max_messages": campaign_dict.get("max_messages"),
+                "error_count": campaign_dict.get("error_count"),
+                "target_kind": campaign_dict.get("target_kind"),
+            }
+        )
+    state.setdefault("status", "running" if task_running else "idle")
+    state["running"] = task_running
+    state["project_id"] = project_id
+    state.setdefault("last_error", None)
+    return state
+
+
+def project_runs_krisha_before_auto(project_id: int) -> bool:
+    project = get_project(project_id)
+    return int(project.get("id") or project_id) == KERAMO_PROJECT_ID or project.get("workflow_type") == KERAMO_WORKFLOW_TYPE
+
+
+def reactivate_keramo_cached_pool(project_id: int, target_kind: str = "lead") -> int:
+    current_time = now_iso()
+    with db_conn() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE contacts
+            SET status = CASE WHEN whatsapp_exists = 1 THEN 'ready' ELSE 'new' END,
+                stage = CASE WHEN whatsapp_exists = 1 THEN 'imported' ELSE 'imported_waiting_check' END,
+                updated_at = ?
+            WHERE project_id = ?
+              AND kind = ?
+              AND source = 'krisha'
+              AND status = 'krisha_stale'
+              AND (whatsapp_exists = 1 OR whatsapp_exists IS NULL)
+              AND proposal_sent = 0
+              AND last_inbound_at IS NULL
+            """,
+            (current_time, project_id, target_kind),
+        )
+    return int(cursor.rowcount or 0)
+
+
+def keramo_auto_krisha_payload(settings: dict[str, str], target_messages: int | None = None) -> KrishaImportRequest:
+    payload = krisha_payload_from_settings(settings)
+    target = max(1, int(target_messages or 0)) if target_messages else 0
+    minimum_pool = max(target * 3, target, payload.max_contacts or 0)
+    if minimum_pool and payload.max_contacts != minimum_pool:
+        data = payload.model_dump()
+        data["max_contacts"] = min(minimum_pool, 10000)
+        payload = KrishaImportRequest(**data)
+    return payload
+
+
+async def prepare_keramo_auto_sources(project_id: int, settings: dict[str, str], target_messages: int | None = None) -> dict[str, Any]:
+    effective_settings = {**settings, "krisha_use_browser": "true"}
+    effective_settings.setdefault("krisha_headless", "true")
+    payload = keramo_auto_krisha_payload(effective_settings, target_messages)
+    result = await run_krisha_import_cycle(
+        payload,
+        project_id=project_id,
+        start_whatsapp_check=False,
+        settings_override=effective_settings,
+    )
+    if result.get("found"):
+        await check_whatsapp_worker()
+    return result
 
 
 def log_auto_wait_once(project_id: int, date_key: str, message: str, *, level: str = "warning") -> None:
@@ -5909,24 +8892,42 @@ async def run_auto_campaign_for_project(
     *,
     now_utc: datetime | None = None,
     start_worker: bool = True,
+    force: bool = False,
 ) -> dict[str, Any]:
     with use_project(project_id):
         settings = get_settings()
-        if not is_truthy(settings.get("auto_campaign_enabled")):
+        if not force and not is_truthy(settings.get("auto_campaign_enabled")):
             return {"started": False, "reason": "disabled", "project_id": project_id}
 
-        due, date_key, scheduled_at, reason = auto_campaign_due(settings, now_utc)
+        due, date_key, scheduled_at, reason = auto_campaign_due(settings, now_utc, ignore_last_run=force)
+        if force:
+            due = True
+            reason = "manual"
+        timing = auto_campaign_timing(settings, now_utc)
         runtime_state["auto_work"].update(
             {
                 "status": "running",
                 "last_check_at": now_iso(),
                 "last_project_id": project_id,
-                "next_scheduled_at": scheduled_at.isoformat(),
+                "next_scheduled_at": timing["next_scheduled_at"],
+                "local_now": timing["local_now"],
+                "server_now_utc": timing["server_now_utc"],
                 "last_error": None,
             }
         )
         if not due:
             return {"started": False, "reason": reason, "project_id": project_id, "date": date_key}
+        if not force and settings.get("auto_campaign_last_error_date") == date_key:
+            error_message = settings.get("auto_campaign_last_error") or "Авторабота уже остановлена сегодня из-за ошибки"
+            runtime_state["auto_work"]["last_action"] = "skipped_after_error"
+            runtime_state["auto_work"]["last_error"] = error_message
+            return {
+                "started": False,
+                "reason": "last_error_today",
+                "project_id": project_id,
+                "date": date_key,
+                "error": error_message,
+            }
 
         try:
             config = parse_auto_campaign_config(settings)
@@ -5939,12 +8940,91 @@ async def run_auto_campaign_for_project(
             log_auto_wait_once(project_id, date_key, "Авторабота ждет GreenAPI: заполните ID инстанса и токен")
             return {"started": False, "reason": "greenapi_not_configured", "project_id": project_id}
 
-        if campaign_task_is_running():
-            log_auto_wait_once(project_id, date_key, "Авторабота ждет: сейчас уже идет рассылка")
+        if campaign_task_is_running_for_project(project_id):
+            log_auto_wait_once(project_id, date_key, "Авторабота ждет: в этом проекте уже идет рассылка")
             return {"started": False, "reason": "campaign_running", "project_id": project_id}
 
+        krisha_result: dict[str, Any] | None = None
+        runs_krisha_before_auto = project_runs_krisha_before_auto(project_id)
+        if runs_krisha_before_auto:
+            reactivated_count = reactivate_keramo_cached_pool(project_id, str(config["target_kind"]))
+            if reactivated_count:
+                runtime_state["auto_work"]["last_action"] = "reactivated_cached_krisha_contacts"
+                log_event(
+                    "auto_work",
+                    f"Авторабота KERAMO: вернул в пул ранее спарсенные контакты: {reactivated_count}",
+                    project_id=project_id,
+                    payload={"target_kind": config["target_kind"], "reactivated": reactivated_count},
+                )
         ready_count = ready_campaign_contacts_count(project_id, str(config["target_kind"]))
+        if runs_krisha_before_auto and ready_count <= 0:
+            pending_cached_count = pending_whatsapp_contacts_count(project_id, str(config["target_kind"]))
+            if pending_cached_count > 0:
+                runtime_state["auto_work"]["last_action"] = "checking_cached_whatsapp_contacts"
+                log_event(
+                    "auto_work",
+                    f"Авторабота KERAMO: сначала проверяю ранее спарсенные номера в WhatsApp: {pending_cached_count}",
+                    project_id=project_id,
+                    payload={"pending": pending_cached_count, "target_kind": config["target_kind"]},
+                )
+                await check_whatsapp_worker()
+                ready_count = ready_campaign_contacts_count(project_id, str(config["target_kind"]))
+
+        if runs_krisha_before_auto and ready_count <= 0:
+            pending_cached_count = pending_whatsapp_contacts_count(project_id, str(config["target_kind"]))
+            if pending_cached_count <= 0:
+                runtime_state["auto_work"]["last_action"] = "krisha_import_after_cached_pool_empty"
+                log_event(
+                    "auto_work",
+                    "Авторабота KERAMO: готовый пул пуст, запускаю новый Krisha-парсинг",
+                    project_id=project_id,
+                )
+                krisha_result = await prepare_keramo_auto_sources(project_id, settings, int(config["max_messages"]))
+                runtime_state["auto_work"]["krisha_last_result"] = {
+                    key: krisha_result.get(key)
+                    for key in ("found", "imported", "updated", "source_errors")
+                }
+                ready_count = ready_campaign_contacts_count(project_id, str(config["target_kind"]))
+
         if ready_count <= 0:
+            source_errors = [str(item) for item in (krisha_result or {}).get("source_errors", [])]
+            if krisha_result and krisha_has_captcha_error([str(item) for item in krisha_result.get("source_errors", [])]):
+                message = "Авторабота KERAMO остановлена: Krisha запросила CAPTCHA при показе телефона"
+                log_auto_wait_once(project_id, date_key, message, level="warning")
+                runtime_state["auto_work"]["last_action"] = "krisha_captcha_required"
+                runtime_state["auto_work"]["last_error"] = message
+                update_settings(
+                    {
+                        "auto_campaign_last_error_date": date_key,
+                        "auto_campaign_last_error": message,
+                    },
+                    project_id=project_id,
+                )
+                return {
+                    "started": False,
+                    "reason": "krisha_captcha_required",
+                    "project_id": project_id,
+                    "krisha": krisha_result,
+                }
+            if krisha_result and source_errors:
+                message = f"Авторабота KERAMO остановлена: Krisha-парсинг завершился с ошибкой: {source_errors[0]}"
+                log_auto_wait_once(project_id, date_key, message, level="warning")
+                runtime_state["auto_work"]["last_action"] = "krisha_import_error"
+                runtime_state["auto_work"]["last_error"] = message
+                update_settings(
+                    {
+                        "auto_campaign_last_error_date": date_key,
+                        "auto_campaign_last_error": message,
+                    },
+                    project_id=project_id,
+                )
+                return {
+                    "started": False,
+                    "reason": "krisha_import_error",
+                    "project_id": project_id,
+                    "error": message,
+                    "krisha": krisha_result,
+                }
             pending_count = pending_whatsapp_contacts_count(project_id, str(config["target_kind"]))
             if pending_count > 0:
                 log_auto_wait_once(
@@ -5958,6 +9038,8 @@ async def run_auto_campaign_for_project(
                 {
                     "auto_campaign_last_run_date": date_key,
                     "auto_campaign_last_wait_date": "",
+                    "auto_campaign_last_error_date": "",
+                    "auto_campaign_last_error": "",
                 },
                 project_id=project_id,
             )
@@ -5974,6 +9056,8 @@ async def run_auto_campaign_for_project(
             {
                 "auto_campaign_last_run_date": date_key,
                 "auto_campaign_last_wait_date": "",
+                "auto_campaign_last_error_date": "",
+                "auto_campaign_last_error": "",
             },
             project_id=project_id,
         )
@@ -5987,7 +9071,10 @@ async def run_auto_campaign_for_project(
             payload={"date": date_key, **config},
         )
         runtime_state["auto_work"]["last_action"] = f"started_campaign_{campaign_id}"
-        return {"started": True, "reason": "started", "project_id": project_id, "campaign_id": campaign_id}
+        result = {"started": True, "reason": "started", "project_id": project_id, "campaign_id": campaign_id}
+        if krisha_result is not None:
+            result["krisha"] = krisha_result
+        return result
 
 
 async def send_campaign_message(contact: dict[str, Any]) -> None:
@@ -6081,17 +9168,16 @@ async def notification_poller(project_id: int | None = None) -> None:
 
 
 async def _notification_poller() -> None:
-    runtime_state["ai"] = {"status": "running", "processed": 0, "last_error": None, "project_id": current_project_id()}
+    project_id = current_project_id()
+    set_ai_state(project_id, status="running", processed=0, last_error=None)
     while is_truthy(get_settings().get("ai_enabled")):
         settings = get_settings()
-        runtime_state["ai"]["project_id"] = current_project_id()
         green = GreenApiClient(settings)
         if not green.configured:
-            runtime_state["ai"]["status"] = "waiting_greenapi"
-            runtime_state["ai"]["last_error"] = "GreenAPI не настроен"
+            set_ai_state(project_id, status="waiting_greenapi", last_error="GreenAPI не настроен")
             await asyncio.sleep(5)
             continue
-        runtime_state["ai"]["status"] = "running"
+        set_ai_state(project_id, status="running", last_error=None)
         try:
             notification = await green.receive_notification(receive_timeout=5)
             if notification:
@@ -6099,19 +9185,20 @@ async def _notification_poller() -> None:
                 body = notification.get("body") or {}
                 try:
                     await process_notification_body(body, source="poll")
-                    runtime_state["ai"]["processed"] += 1
+                    state = ai_states.setdefault(project_id, default_ai_state(project_id))
+                    set_ai_state(project_id, processed=int(state.get("processed") or 0) + 1)
                 finally:
                     if receipt_id is not None:
                         await green.delete_notification(int(receipt_id))
             else:
                 await asyncio.sleep(0.2)
         except asyncio.CancelledError:
-            runtime_state["ai"]["status"] = "stopped"
+            set_ai_state(project_id, status="stopped")
             raise
         except Exception as exc:
-            runtime_state["ai"]["last_error"] = str(exc)
+            set_ai_state(project_id, last_error=str(exc))
             await asyncio.sleep(3)
-    runtime_state["ai"]["status"] = "stopped"
+    set_ai_state(project_id, status="stopped")
 
 
 async def sync_recent_incoming_history(minutes: int | None = None, only_known: bool = True) -> None:
@@ -6122,13 +9209,14 @@ async def sync_recent_incoming_history(minutes: int | None = None, only_known: b
         return
 
     sync_minutes = minutes or int(settings.get("green_history_sync_minutes") or 1440)
-    runtime_state["ai"]["status"] = "history_sync"
+    project_id = current_project_id()
+    set_ai_state(project_id, status="history_sync")
     log_event("ai", f"Синхронизация входящей истории GreenAPI за {sync_minutes} мин. запущена")
 
     try:
         items = await green.last_incoming_messages(sync_minutes)
     except Exception as exc:
-        runtime_state["ai"]["last_error"] = str(exc)
+        set_ai_state(project_id, last_error=str(exc))
         log_event("ai", f"Ошибка синхронизации истории GreenAPI: {exc}", level="error")
         return
 
@@ -6163,7 +9251,8 @@ async def sync_recent_incoming_history(minutes: int | None = None, only_known: b
             )
             processed += 1
 
-    runtime_state["ai"]["processed"] = int(runtime_state["ai"].get("processed") or 0) + processed
+    state = ai_states.setdefault(project_id, default_ai_state(project_id))
+    set_ai_state(project_id, processed=int(state.get("processed") or 0) + processed, status="history_sync")
     log_event(
         "ai",
         f"Синхронизация истории GreenAPI завершена: новых {processed}, чатов {len(grouped_items)}, пропущено {skipped}",
@@ -6197,23 +9286,45 @@ def start_check_task() -> None:
 
 def start_poller_task(project_id: int | None = None) -> None:
     resolved_project_id = int(project_id or current_project_id())
-    task = runtime_tasks.get("poller")
+    task = poller_tasks.get(resolved_project_id)
     if task and not task.done():
-        if int(runtime_state.get("ai", {}).get("project_id") or 0) == resolved_project_id:
-            return
-        task.cancel()
-    runtime_tasks["poller"] = asyncio.create_task(notification_poller(resolved_project_id))
+        return
+    task = asyncio.create_task(notification_poller(resolved_project_id))
+    poller_tasks[resolved_project_id] = task
+    if selected_project_id() == resolved_project_id:
+        runtime_tasks["poller"] = task
 
 
 def start_ai_resume_task(project_id: int | None = None) -> None:
     resolved_project_id = int(project_id or current_project_id())
-    task = runtime_tasks.get("ai_sync")
+    task = ai_sync_tasks.get(resolved_project_id)
     if task and not task.done():
-        if int(runtime_state.get("ai", {}).get("project_id") or 0) == resolved_project_id:
-            return
-        task.cancel()
-    runtime_state["ai"] = {"status": "history_sync", "processed": 0, "last_error": None, "project_id": resolved_project_id}
-    runtime_tasks["ai_sync"] = asyncio.create_task(ai_resume_worker(resolved_project_id))
+        return
+    set_ai_state(resolved_project_id, status="history_sync", processed=0, last_error=None)
+    task = asyncio.create_task(ai_resume_worker(resolved_project_id))
+    ai_sync_tasks[resolved_project_id] = task
+    if selected_project_id() == resolved_project_id:
+        runtime_tasks["ai_sync"] = task
+
+
+def sync_ai_runtime_for_project(project_id: int) -> None:
+    resolved_project_id = int(project_id)
+    runtime_tasks["poller"] = poller_tasks.get(resolved_project_id)
+    runtime_tasks["ai_sync"] = ai_sync_tasks.get(resolved_project_id)
+    runtime_state["ai"] = ai_runtime_for_project(resolved_project_id)
+    if is_truthy(get_settings(resolved_project_id).get("ai_enabled")):
+        start_ai_resume_task(resolved_project_id)
+
+
+def stop_ai_tasks_for_project(project_id: int) -> None:
+    resolved_project_id = int(project_id)
+    for task_map, legacy_key in ((poller_tasks, "poller"), (ai_sync_tasks, "ai_sync")):
+        task = task_map.pop(resolved_project_id, None)
+        if task and not task.done():
+            task.cancel()
+        if runtime_tasks.get(legacy_key) is task:
+            runtime_tasks[legacy_key] = None
+    set_ai_state(resolved_project_id, status="stopped")
 
 
 async def auto_work_scheduler() -> None:
@@ -6291,22 +9402,28 @@ def recover_stale_proposal_sends() -> None:
 def resume_running_campaign() -> None:
     with db_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM campaigns WHERE status = 'running' ORDER BY id DESC"
+            "SELECT * FROM campaigns WHERE status = 'running' ORDER BY project_id, id DESC"
         ).fetchall()
     if not rows:
         return
-    campaign = dict(rows[0])
-    if len(rows) > 1:
-        old_ids = [row["id"] for row in rows[1:]]
+    latest_by_project: dict[int, sqlite3.Row] = {}
+    old_ids: list[int] = []
+    for row in rows:
+        project_id = int(row["project_id"])
+        if project_id in latest_by_project:
+            old_ids.append(int(row["id"]))
+            continue
+        latest_by_project[project_id] = row
+    if old_ids:
         with db_conn() as conn:
             conn.executemany(
                 "UPDATE campaigns SET status = 'paused', updated_at = ? WHERE id = ?",
                 [(now_iso(), old_id) for old_id in old_ids],
             )
-        log_event("campaign", f"Найдено несколько running-кампаний, старые поставлены на паузу: {old_ids}", level="warning")
+        log_event("campaign", f"Найдены лишние running-кампании внутри проектов, старые поставлены на паузу: {old_ids}", level="warning")
 
-    task = runtime_tasks.get("campaign")
-    if not task or task.done():
+    for campaign_row in latest_by_project.values():
+        campaign = dict(campaign_row)
         start_campaign_task(int(campaign["id"]), int(campaign["project_id"]))
         log_event(
             "campaign",
@@ -6322,13 +9439,22 @@ async def on_startup() -> None:
     recover_stale_proposal_sends()
     resume_running_campaign()
     start_auto_work_task()
-    if is_truthy(get_settings().get("ai_enabled")):
-        start_ai_resume_task()
+    for project in list_projects():
+        project_id = int(project["id"])
+        if is_truthy(get_settings(project_id).get("ai_enabled")):
+            start_ai_resume_task(project_id)
+    sync_ai_runtime_for_project(selected_project_id())
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     for task in runtime_tasks.values():
+        if task and not task.done():
+            task.cancel()
+    for task in [*poller_tasks.values(), *ai_sync_tasks.values()]:
+        if task and not task.done():
+            task.cancel()
+    for task in list(campaign_tasks.values()):
         if task and not task.done():
             task.cancel()
     await asyncio.sleep(0)
@@ -6406,10 +9532,13 @@ async def api_projects() -> dict[str, Any]:
 
 @app.post("/api/projects/current")
 async def api_switch_project(payload: ProjectSwitchPayload) -> dict[str, Any]:
+    previous_project_id = current_project_id()
     project = get_project(payload.project_id)
     if int(project["id"]) != payload.project_id:
         raise HTTPException(status_code=404, detail="Проект не найден")
     update_settings({"current_project_id": str(payload.project_id)})
+    if payload.project_id != previous_project_id:
+        sync_ai_runtime_for_project(payload.project_id)
     log_event("settings", f"Активный проект переключен: {project['name']}", project_id=payload.project_id)
     return {"ok": True, "project": project}
 
@@ -6706,13 +9835,31 @@ async def api_campaign_start(payload: CampaignStart) -> dict[str, Any]:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    current_task = runtime_tasks.get("campaign")
-    if current_task and not current_task.done():
-        raise HTTPException(status_code=409, detail="Кампания уже запущена")
+    project_id = current_project_id()
+    if campaign_task_is_running_for_project(project_id):
+        raise HTTPException(status_code=409, detail="Кампания уже запущена в этом проекте")
     settings = get_settings()
     if not GreenApiClient(settings).configured:
         raise HTTPException(status_code=400, detail="Сначала заполните GreenAPI ID и токен")
-    project_id = current_project_id()
+    if project_runs_krisha_before_auto(project_id):
+        reactivated_count = reactivate_keramo_cached_pool(project_id, payload.target_kind)
+        if reactivated_count:
+            log_event(
+                "campaign",
+                f"Ручная рассылка KERAMO: вернул в пул ранее спарсенные контакты: {reactivated_count}",
+                project_id=project_id,
+                payload={"target_kind": payload.target_kind, "reactivated": reactivated_count},
+            )
+        if ready_campaign_contacts_count(project_id, payload.target_kind) <= 0:
+            pending_cached_count = pending_whatsapp_contacts_count(project_id, payload.target_kind)
+            if pending_cached_count > 0:
+                log_event(
+                    "campaign",
+                    f"Ручная рассылка KERAMO: сначала проверяю ранее спарсенные номера в WhatsApp: {pending_cached_count}",
+                    project_id=project_id,
+                    payload={"target_kind": payload.target_kind, "pending": pending_cached_count},
+                )
+                await check_whatsapp_worker()
     campaign_id = create_campaign_record(
         project_id=project_id,
         target_kind=payload.target_kind,
@@ -6727,6 +9874,7 @@ async def api_campaign_start(payload: CampaignStart) -> dict[str, Any]:
 
 @app.post("/api/campaign/pause")
 async def api_campaign_pause() -> dict[str, Any]:
+    project_id = current_project_id()
     with db_conn() as conn:
         conn.execute(
             """
@@ -6736,37 +9884,44 @@ async def api_campaign_pause() -> dict[str, Any]:
               AND project_id = ?
               AND status = 'running'
             """,
-            (now_iso(), now_iso(), current_project_id(), current_project_id()),
+            (now_iso(), now_iso(), project_id, project_id),
         )
+    task = campaign_task_for_project(project_id)
+    if task and not task.done():
+        task.cancel()
+    campaign_tasks.pop(project_id, None)
+    runtime_state["campaign"].update({"status": "paused", "project_id": project_id})
     log_event("campaign", "Кампания поставлена на паузу")
     return {"ok": True}
 
 
 @app.post("/api/campaign/resume")
 async def api_campaign_resume() -> dict[str, Any]:
+    project_id = current_project_id()
     with db_conn() as conn:
         campaign = conn.execute(
             "SELECT * FROM campaigns WHERE project_id = ? AND status = 'paused' ORDER BY id DESC LIMIT 1",
-            (current_project_id(),),
+            (project_id,),
         ).fetchone()
         if not campaign:
             raise HTTPException(status_code=404, detail="Нет кампании на паузе")
         campaign_id = int(campaign["id"])
         conn.execute(
             "UPDATE campaigns SET status = 'running', stopped_at = NULL, updated_at = ? WHERE id = ? AND project_id = ?",
-            (now_iso(), campaign_id, current_project_id()),
+            (now_iso(), campaign_id, project_id),
         )
-    task = runtime_tasks.get("campaign")
-    if not task or task.done():
-        runtime_tasks["campaign"] = asyncio.create_task(campaign_worker(campaign_id))
+    if not campaign_task_is_running_for_project(project_id):
+        start_campaign_task(campaign_id, project_id)
     runtime_state["campaign"]["status"] = "running"
     runtime_state["campaign"]["campaign_id"] = campaign_id
+    runtime_state["campaign"]["project_id"] = project_id
     log_event("campaign", f"Кампания #{campaign_id} продолжена", campaign_id=campaign_id)
     return {"ok": True, "campaign_id": campaign_id}
 
 
 @app.post("/api/campaign/stop")
 async def api_campaign_stop() -> dict[str, Any]:
+    project_id = current_project_id()
     with db_conn() as conn:
         conn.execute(
             """
@@ -6776,14 +9931,66 @@ async def api_campaign_stop() -> dict[str, Any]:
               AND project_id = ?
               AND status IN ('running', 'paused')
             """,
-            (now_iso(), now_iso(), current_project_id(), current_project_id()),
+            (now_iso(), now_iso(), project_id, project_id),
         )
-    task = runtime_tasks.get("campaign")
+    task = campaign_task_for_project(project_id)
     if task and not task.done():
         task.cancel()
+    campaign_tasks.pop(project_id, None)
     runtime_state["campaign"]["status"] = "stopped"
+    runtime_state["campaign"]["project_id"] = project_id
     log_event("campaign", "Кампания остановлена")
     return {"ok": True}
+
+
+@app.post("/api/auto-work/run-now")
+async def api_auto_work_run_now() -> dict[str, Any]:
+    project_id = current_project_id()
+    start_auto_work_task()
+    try:
+        result = await run_auto_campaign_for_project(project_id, force=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    settings = get_settings(project_id)
+    return {"ok": True, "result": result, "state": auto_work_runtime_for_project(project_id, settings)}
+
+
+@app.post("/api/auto-work/stop")
+async def api_auto_work_stop() -> dict[str, Any]:
+    project_id = current_project_id()
+    update_settings({"auto_campaign_enabled": "false"}, project_id=project_id)
+    with db_conn() as conn:
+        conn.execute(
+            """
+            UPDATE campaigns
+            SET status = 'stopped', stopped_at = ?, updated_at = ?
+            WHERE project_id = ?
+              AND status IN ('running', 'paused')
+            """,
+            (now_iso(), now_iso(), project_id),
+        )
+    task = campaign_task_for_project(project_id)
+    if task and not task.done():
+        task.cancel()
+    campaign_tasks.pop(project_id, None)
+    if int(runtime_state.get("campaign", {}).get("project_id") or 0) == project_id:
+        runtime_state["campaign"]["status"] = "stopped"
+    if int(runtime_state.get("krisha_parser", {}).get("project_id") or 0) == project_id:
+        parser_task = runtime_tasks.get("krisha_parser")
+        if parser_task and not parser_task.done():
+            parser_task.cancel()
+        runtime_state["krisha_parser"]["status"] = "stopped"
+    runtime_state["auto_work"].update(
+        {
+            "status": "running" if runtime_tasks.get("auto_work") and not runtime_tasks["auto_work"].done() else "stopped",
+            "last_action": "stopped_for_project",
+            "last_project_id": project_id,
+            "last_error": None,
+        }
+    )
+    log_event("auto_work", "Авторабота остановлена для проекта: автозапуск выключен, активные кампании остановлены", project_id=project_id)
+    settings = get_settings(project_id)
+    return {"ok": True, "state": auto_work_runtime_for_project(project_id, settings)}
 
 
 @app.post("/api/ai/toggle")
@@ -6793,13 +10000,8 @@ async def api_ai_toggle(payload: AiToggle) -> dict[str, Any]:
     if payload.enabled:
         start_ai_resume_task(project_id)
     else:
-        task = runtime_tasks.get("poller")
-        if task and not task.done() and int(runtime_state.get("ai", {}).get("project_id") or 0) == project_id:
-            task.cancel()
-        sync_task = runtime_tasks.get("ai_sync")
-        if sync_task and not sync_task.done() and int(runtime_state.get("ai", {}).get("project_id") or 0) == project_id:
-            sync_task.cancel()
-        runtime_state["ai"]["status"] = "stopped"
+        stop_ai_tasks_for_project(project_id)
+    runtime_state["ai"] = ai_runtime_for_project(project_id)
     log_event("ai", "AI-режим включен" if payload.enabled else "AI-режим выключен")
     return {"ok": True, "enabled": payload.enabled}
 
@@ -6841,10 +10043,14 @@ async def api_stats() -> dict[str, Any]:
             """,
             (project_id,),
         ).fetchall()
+    project_runtime = dict(runtime_state)
+    project_runtime["ai"] = ai_runtime_for_project(project_id)
+    project_runtime["campaign"] = campaign_runtime_for_project(project_id, campaign)
+    project_runtime["auto_work"] = auto_work_runtime_for_project(project_id, settings)
     return {
         "stats": stats,
         "campaign": row_dict(campaign),
-        "runtime": runtime_state,
+        "runtime": project_runtime,
         "recent_messages": [dict(row) for row in recent_messages],
         "project": get_project(project_id),
         "auto_work_settings": {

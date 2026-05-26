@@ -208,7 +208,7 @@
           </div>
         </div>
         <div class="panel">
-          <p class="note krisha-note">Раздел работает только для проекта KERAMO BUILD. Парсер авторизуется в Krisha, хранит сессию, открывает коммерческие объявления по заданным фильтрам, раскрывает доступные телефоны, сохраняет номера в БД и запускает проверку WhatsApp. CAPTCHA не обходится: при защите парсер остановится и покажет статус.</p>
+          <p class="note krisha-note">Раздел работает только для проекта KERAMO BUILD. Парсер авторизуется в Krisha, хранит сессию, открывает коммерческие объявления по заданным фильтрам, раскрывает доступные телефоны, сохраняет номера в БД и запускает проверку WhatsApp. Если серверный IP попадает под anti-bot Krisha, используйте browser proxy или residential/static proxy ниже.</p>
           <div class="form-grid krisha-filters">
             <label>Логин Krisha<input id="krisha_login" autocomplete="off" placeholder="+7... или email"></label>
             <label>Пароль Krisha<input id="krisha_password" type="password" autocomplete="off"></label>
@@ -232,6 +232,17 @@
             <label>Страниц поиска<input id="krisha_max_pages" type="number" min="1" max="10"></label>
             <label>Номеров собрать<input id="krisha_max_contacts" type="number" min="1" max="10000" step="1" placeholder="без лимита"></label>
             <label>Интервал фона, мин<input id="krisha_interval_minutes" type="number" min="1" step="1"></label>
+            <label>Браузер Krisha
+              <select id="krisha_browser_engine">
+                <option value="selenium_undetected">Selenium Undetected v2</option>
+                <option value="playwright">Playwright Chromium v1</option>
+              </select>
+            </label>
+            <label>Chrome binary path<input id="krisha_chrome_executable_path" autocomplete="off" placeholder="авто: Playwright Chromium"></label>
+            <label>Proxy server<input id="krisha_proxy_server" autocomplete="off" placeholder="http://host:port или socks5://host:port"></label>
+            <label>Proxy username<input id="krisha_proxy_username" autocomplete="off"></label>
+            <label>Proxy password<input id="krisha_proxy_password" type="password" autocomplete="off"></label>
+            <label>Proxy bypass<input id="krisha_proxy_bypass" autocomplete="off" placeholder="localhost,127.0.0.1"></label>
           </div>
           <div class="toggle-row krisha-toggles">
             <label><input id="krisha_use_browser" type="checkbox" value="true"> Браузерный режим</label>
@@ -292,7 +303,11 @@
             <p class="eyebrow">Планировщик</p>
             <h2>Авторабота по проекту</h2>
           </div>
-          <button id="saveAutoWorkSettingsBtn" type="button">Сохранить автоработу</button>
+          <div class="actions">
+            <button id="saveAutoWorkSettingsBtn" type="button">Сохранить</button>
+            <button id="runAutoWorkNowBtn" type="button">Запустить сейчас</button>
+            <button id="stopAutoWorkBtn" type="button" class="secondary">Остановить</button>
+          </div>
         </div>
         <div class="panel">
           <div class="form-grid">
@@ -303,7 +318,7 @@
               </select>
             </label>
             <label>Время запуска каждый день<input id="auto_campaign_time" type="time"></label>
-            <label>Часовой пояс<input id="auto_campaign_timezone" autocomplete="off" placeholder="Asia/Qyzylorda"></label>
+            <label>Часовой пояс<input id="auto_campaign_timezone" autocomplete="off" placeholder="Asia/Almaty"></label>
             <label>Сообщений в день<input id="auto_campaign_max_messages" type="number" min="1" max="10000"></label>
             <label>Мин. задержка, сек<input id="auto_campaign_delay_min_seconds" type="number" min="1" max="86400"></label>
             <label>Макс. задержка, сек<input id="auto_campaign_delay_max_seconds" type="number" min="1" max="86400"></label>

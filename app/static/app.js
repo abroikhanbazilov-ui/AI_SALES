@@ -51,7 +51,13 @@ const krishaSettingsIds = [
   "krisha_max_contacts",
   "krisha_interval_minutes",
   "krisha_use_browser",
+  "krisha_browser_engine",
   "krisha_headless",
+  "krisha_chrome_executable_path",
+  "krisha_proxy_server",
+  "krisha_proxy_username",
+  "krisha_proxy_password",
+  "krisha_proxy_bypass",
 ];
 const autoWorkSettingsIds = [
   "auto_campaign_enabled",
@@ -375,6 +381,24 @@ function formatDateTime(value) {
   });
 }
 
+function formatDateTimeInZone(value, timeZone) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  try {
+    return date.toLocaleString("ru-RU", {
+      timeZone,
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch (e) {
+    return formatDateTime(value);
+  }
+}
+
 function formatShortDate(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -579,18 +603,25 @@ function renderAutoWorkStatus(data = null) {
   const runtime = data?.runtime?.auto_work || {};
   const enabled = latestSettings.auto_campaign_enabled === true || latestSettings.auto_campaign_enabled === "true" || latestSettings.auto_campaign_enabled === "1";
   const nextTime = latestSettings.auto_campaign_time || "10:00";
-  const timezone = latestSettings.auto_campaign_timezone || "Asia/Qyzylorda";
+  const timezone = latestSettings.auto_campaign_timezone || "Asia/Almaty";
   const limit = latestSettings.auto_campaign_max_messages || "25";
   const delayMin = latestSettings.auto_campaign_delay_min_seconds || "40";
   const delayMax = latestSettings.auto_campaign_delay_max_seconds || "120";
+  const scheduler = runtime.scheduler_running ? "запущен" : "остановлен";
+  const localNow = runtime.local_now ? formatDateTimeInZone(runtime.local_now, timezone) : "—";
+  const nextScheduled = runtime.next_scheduled_at ? formatDateTimeInZone(runtime.next_scheduled_at, timezone) : "—";
   node.innerHTML = [
     runtimeRow("Статус", runtime.status || "idle"),
+    runtimeRow("Фоновый планировщик", scheduler),
     runtimeRow("Автозапуск", enabled ? "включен" : "выключен"),
     runtimeRow("Ежедневное время", `${nextTime} (${timezone})`),
+    runtimeRow("Сейчас в Астане", localNow),
+    runtimeRow("Следующий запуск", nextScheduled),
     runtimeRow("Лимит в день", limit),
     runtimeRow("Задержка", `${delayMin}-${delayMax} сек`),
     runtimeRow("Последний запуск", latestSettings.auto_campaign_last_run_date || "—"),
     runtimeRow("Последняя проверка", formatDateTime(runtime.last_check_at)),
+    runtimeRow("Проект проверки", runtime.last_project_id || "—"),
     runtimeRow("Последнее действие", runtime.last_action || "—"),
     runtimeRow("Последняя ошибка", runtime.last_error || "нет"),
   ].join("");
@@ -998,6 +1029,34 @@ async function stopCampaign() {
   await refreshAll();
 }
 
+async function runAutoWorkNow() {
+  await saveAutoWorkSettings(false);
+  const data = await api("/api/auto-work/run-now", {method: "POST"});
+  const result = data.result || {};
+  renderAutoWorkStatus({runtime: {auto_work: data.state || {}}});
+  if (result.started) {
+    toast(`Авторабота запустила рассылку #${result.campaign_id}`);
+  } else if (result.reason === "waiting_whatsapp_check") {
+    toast("Авторабота ждет завершения проверки WhatsApp");
+  } else if (result.reason === "krisha_captcha_required") {
+    toast("Krisha запросила CAPTCHA при показе телефона");
+  } else if (result.reason === "no_ready_contacts") {
+    toast("Нет готовых контактов для рассылки");
+  } else {
+    toast(`Авторабота не запущена: ${result.reason || "нет действия"}`);
+  }
+  await refreshAll();
+}
+
+async function stopAutoWork() {
+  const data = await api("/api/auto-work/stop", {method: "POST"});
+  latestSettings.auto_campaign_enabled = "false";
+  renderAutoWorkStatus({runtime: {auto_work: data.state || {}}});
+  await loadSettings();
+  toast("Авторабота остановлена для проекта");
+  await refreshAll();
+}
+
 async function toggleAi(enabled) {
   await api("/api/ai/toggle", {method: "POST", body: JSON.stringify({enabled})});
   toast(enabled ? "AI-режим включен" : "AI-режим выключен");
@@ -1045,6 +1104,8 @@ function bindEvents() {
   $("resumeCampaignBtn").addEventListener("click", () => resumeCampaign().catch((e) => toast(e.message)));
   $("stopCampaignBtn").addEventListener("click", () => stopCampaign().catch((e) => toast(e.message)));
   $("saveAutoWorkSettingsBtn").addEventListener("click", () => saveAutoWorkSettings().catch((e) => toast(e.message)));
+  $("runAutoWorkNowBtn").addEventListener("click", () => runAutoWorkNow().catch((e) => toast(e.message)));
+  $("stopAutoWorkBtn").addEventListener("click", () => stopAutoWork().catch((e) => toast(e.message)));
   $("enableAiBtn").addEventListener("click", () => toggleAi(true).catch((e) => toast(e.message)));
   $("disableAiBtn").addEventListener("click", () => toggleAi(false).catch((e) => toast(e.message)));
   $("selectAllContactsBtn").addEventListener("click", () => toggleVisibleContactsSelection(true));

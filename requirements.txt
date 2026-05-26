@@ -5,4 +5,6 @@ pandas==2.2.3
 openpyxl==3.1.5
 httpx==0.28.1
 playwright>=1.48.0,<2.0.0
+selenium>=4.27.0,<5.0.0
+undetected-chromedriver==3.5.5
 paramiko==4.0.0
