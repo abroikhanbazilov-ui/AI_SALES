@@ -51,8 +51,11 @@ SECOND_PROJECT_AI_PROMPT = """Ты B2B sales assistant в WhatsApp для про
 Стиль: живой B2B-мессенджер, 1-2 коротких предложения, один вопрос за сообщение, без давления и без длинных офферов. Не обещай гарантированную доходность, прибыль без риска или юридическую защиту без оговорок. Говори как про сценарий и условия сделки, а не как про гарантированный результат. Не используй термин «ЛПР» в сообщениях клиенту; пиши «собственник», «инвестор», «руководитель» или «тот, кто смотрит инвестиционные вопросы». Не используй шаблонные завершающие фразы вроде «если захотите вернуться к вопросу» или «я на связи».
 
 Правила поведения:
+- Первый исходящий контакт по Крыше (Krisha) всегда минимальный: только приветствие, без KERAMO BUILD, без инвестиций и без цифр.
+- После ответного приветствия/любой первой реакции сначала используй контекст объявления: напиши, что увидел объявление на Крыше, коротко назови объект и спроси, продает ли человек этот объект.
+- Инвестиционный оффер KERAMO BUILD раскрывай только после подтверждения, что объявление актуально/человек продает объект.
 - Используй research-first и permission-based selling: если есть сигнал по коммерческой недвижимости, собственнику помещения или аренде, аккуратно свяжи его с инвестиционной темой.
-- В первом контакте не отправляй длинный оффер. Сначала спроси, уместно ли коротко написать по инвестиционному предложению.
+- После подтверждения продажи не отправляй длинный оффер: коротко представь KERAMO BUILD и спроси разрешение отправить КП/цифры.
 - Если собеседник проявил интерес или попросил подробнее, коротко объясни суть и предложи один следующий шаг: отправить короткое КП сюда в WhatsApp или перейти к короткому созвону.
 - Не уводи разговор в лишнюю квалификацию до отправки КП: не начинай с вопросов про комфорт чека, бюджет или глубину интереса, если человек еще не видел материалы.
 - Если контакт ответственного уже передали, начни короткий диалог с ним и только после этого предлагай КП или короткий созвон.
@@ -302,6 +305,15 @@ WARMUP_AUTOCREDIT_YES_RE = re.compile(
 WARMUP_AUTOCREDIT_NO_RE = re.compile(
     r"\b(нет|не\s+предоставля(?:ем|ю)|не\s+оформля(?:ем|ю)|не\s+занима(?:емся|юсь)|"
     r"не\s+работа(?:ем|ю)|нет\s+такого|автокредит\w*\s+нет)\b",
+    re.IGNORECASE,
+)
+KERAMO_LISTING_SELLING_YES_RE = re.compile(
+    r"^\s*(?:да|и[әе]|ага|верно|актуально|в\s+продаже|продаю|сатамын|сатып\s+жатырмын)\b|"
+    r"\b(?:да,\s*)?(?:продаю|продаем|продаётся|продается|актуально|в\s+продаже)\b",
+    re.IGNORECASE,
+)
+KERAMO_LISTING_SELLING_NO_RE = re.compile(
+    r"\b(?:нет|жоқ|не\s+продаю|не\s+продаем|не\s+актуально|неактуально|продано|снято|уже\s+продал\w*|ошиблись)\b",
     re.IGNORECASE,
 )
 CONFUSION_RE = re.compile(
@@ -4876,6 +4888,44 @@ def proposal_offer_reply() -> str:
     return "Понял. Если удобно, пришлю короткое КП сюда в WhatsApp?"
 
 
+def keramo_listing_summary(contact: dict[str, Any]) -> str:
+    meta = contact_meta(contact)
+    signal_fields = meta.get("signal_fields") if isinstance(meta.get("signal_fields"), dict) else {}
+    title = safe_cell(signal_fields.get("Объект")) or safe_cell(contact.get("company")) or "коммерческая недвижимость"
+    title = clip_text(title, limit=90) or "коммерческая недвижимость"
+    details: list[str] = [title]
+    area = safe_cell(signal_fields.get("Площадь"))
+    city = safe_cell(signal_fields.get("Город")) or safe_cell(meta.get("krisha_city"))
+    price = safe_cell(signal_fields.get("Цена"))
+    for value in (area, city, price):
+        if value and value not in details:
+            details.append(value)
+    return compact_message(", ".join(details), limit=170)
+
+
+def keramo_listing_question_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="keramo_listing_question_sent")
+    return f"Увидел ваше объявление на Крыше: {keramo_listing_summary(contact)}. Вы его продаете?"
+
+
+def keramo_listing_confirmed_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="awaiting_interest_confirmation")
+    return (
+        "Понял, спасибо. Тогда коротко по делу: мы KERAMO BUILD, ищем партнера-инвестора "
+        "в производство керамогранита в Астане. Уместно отправить короткое КП с цифрами?"
+    )
+
+
+def keramo_listing_not_selling_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="not_interested", stage="keramo_listing_not_selling")
+    return "Понял, спасибо. Тогда не буду отвлекать."
+
+
+def keramo_listing_unclear_reply(contact: dict[str, Any]) -> str:
+    update_contact_fields(contact["id"], status="replied", stage="keramo_listing_question_sent")
+    return "Подскажите, пожалуйста, объявление еще актуально - вы его продаете?"
+
+
 def uses_autoscore_warmup_flow(project: dict[str, Any] | None = None) -> bool:
     resolved_project = project or get_project()
     return str(resolved_project.get("workflow_type") or "") == "autoscore_responsible"
@@ -6247,21 +6297,7 @@ def build_campaign_greeting(contact: dict[str, Any]) -> str:
     if uses_autoscore_warmup_flow(project):
         return random.choice(AUTOSCORE_WARMUP_OPENERS)
     if uses_keramo_investor_flow(project):
-        opener = random.choice(["Добрый день.", "Здравствуйте."])
-        company = safe_cell(contact.get("company"))
-        sales_context = contact_sales_context(contact)
-        sales_angle = clip_text(str(sales_context.get("sales_angle") or ""), limit=120)
-        signal = sales_angle or (
-            f"Увидел у вас коммерческую недвижимость{f' ({company})' if company else ''}, поэтому пишу аккуратно по инвестиционной теме."
-        )
-        question = random.choice(
-            [
-                "Уместно коротко написать по инвестиционному предложению в производственный бизнес?",
-                "Вы в принципе рассматриваете инвестиции в операционный бизнес с долей в прибыли?",
-                "Кто у вас смотрит инвестиционные или партнерские предложения?",
-            ]
-        )
-        return compact_message(f"{opener} {agent_intro_text(settings)} {signal} {question}", limit=280)
+        return random.choice(["Здравствуйте.", "Добрый день."])
     opener = random.choice(GREETING_OPENERS)
     context = random.choice(GREETING_CONTEXTS)
     question = random.choice(GREETING_QUESTIONS)
@@ -8045,6 +8081,35 @@ async def _process_notification_body(body: dict[str, Any], source: str = "poll",
             update_contact_fields(contact["id"], status="not_interested", stage="closed_no_interest")
         return
 
+    if uses_keramo_investor_flow() and not int(contact.get("proposal_sent") or 0):
+        stage = str(contact.get("stage") or "")
+        if stage in {"keramo_greeting_sent", "waiting_reply"}:
+            if allow_outbound:
+                reply = keramo_listing_question_reply(contact)
+                if IDENTITY_QUESTION_RE.search(inbound_text):
+                    settings = get_settings()
+                    reply = f"Меня зовут {bot_name(settings) or 'Медет'}. {reply}"
+                await send_and_log(contact, reply)
+            else:
+                update_contact_fields(contact["id"], status="replied", stage="keramo_listing_question_sent")
+            return
+        if stage == "keramo_listing_question_sent":
+            if KERAMO_LISTING_SELLING_NO_RE.search(inbound_text):
+                if allow_outbound:
+                    await send_and_log(contact, keramo_listing_not_selling_reply(contact))
+                else:
+                    update_contact_fields(contact["id"], status="not_interested", stage="keramo_listing_not_selling")
+                return
+            if KERAMO_LISTING_SELLING_YES_RE.search(inbound_text):
+                if allow_outbound:
+                    await send_and_log(contact, keramo_listing_confirmed_reply(contact))
+                else:
+                    update_contact_fields(contact["id"], status="replied", stage="awaiting_interest_confirmation")
+                return
+            if allow_outbound:
+                await send_and_log(contact, keramo_listing_unclear_reply(contact))
+            return
+
     if LANGUAGE_PROMPT_RE.search(inbound_text) and (
         message_data.get("typeMessage") == "buttonsMessage"
         or BOT_OR_AUTO_REPLY_RE.search(inbound_text)
@@ -9081,7 +9146,12 @@ async def send_campaign_message(contact: dict[str, Any]) -> None:
     project = get_project()
     text = build_campaign_greeting(contact)
     await send_and_log(contact, text)
-    next_stage = "warmup_permission" if uses_autoscore_warmup_flow(project) else "waiting_reply"
+    if uses_autoscore_warmup_flow(project):
+        next_stage = "warmup_permission"
+    elif uses_keramo_investor_flow(project):
+        next_stage = "keramo_greeting_sent"
+    else:
+        next_stage = "waiting_reply"
     update_contact_fields(contact["id"], status="sent", stage=next_stage)
 
 

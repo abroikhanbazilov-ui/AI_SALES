@@ -454,7 +454,7 @@ class KeramoProjectTests(TempDbMixin, unittest.TestCase):
         self.assertEqual(project["workflow_type"], main.KERAMO_WORKFLOW_TYPE)
         self.assertEqual(project["proposal_filename"], main.KERAMO_PROPOSAL_FILENAME)
 
-    def test_keramo_campaign_greeting_uses_investor_context(self) -> None:
+    def test_keramo_campaign_greeting_stays_minimal(self) -> None:
         with main.use_project(main.KERAMO_PROJECT_ID):
             lead = main.create_or_update_contact(
                 phone="77000000055",
@@ -469,8 +469,10 @@ class KeramoProjectTests(TempDbMixin, unittest.TestCase):
             )
             text = main.build_campaign_greeting(lead)
 
-        self.assertIn("KERAMO BUILD", text)
-        self.assertTrue("инвест" in text.lower() or "партнер" in text.lower())
+        self.assertIn(text, {"Здравствуйте.", "Добрый день."})
+        self.assertNotIn("KERAMO", text)
+        self.assertNotIn("инвест", text.lower())
+        self.assertNotIn("производ", text.lower())
         self.assertNotIn("автоскор", text.lower())
 
     def test_keramo_interested_reply_offers_proposal_before_budget_check(self) -> None:
@@ -3215,6 +3217,120 @@ class DialogRuntimeTests(TempDbMixin, unittest.IsolatedAsyncioTestCase):
         self.assertIn("отдельную разработку", reply)
         handoff_mock.assert_awaited_once()
 
+    async def test_keramo_campaign_message_sets_greeting_stage(self) -> None:
+        with main.use_project(main.KERAMO_PROJECT_ID):
+            lead = main.create_or_update_contact(
+                phone="77000000072",
+                kind="lead",
+                source="krisha",
+                company="Коммерческое помещение",
+                status="ready",
+                stage="ready",
+            )
+
+            with patch.object(main, "send_and_log", AsyncMock()) as send_mock:
+                await main.send_campaign_message(lead)
+
+            updated = main.get_contact(lead["id"])
+            text = send_mock.await_args.args[1]
+            self.assertEqual(updated["status"], "sent")
+            self.assertEqual(updated["stage"], "keramo_greeting_sent")
+            self.assertIn(text, {"Здравствуйте.", "Добрый день."})
+            self.assertNotIn("KERAMO", text)
+            self.assertNotIn("инвест", text.lower())
+            self.assertNotIn("производ", text.lower())
+
+    async def test_keramo_first_reply_asks_about_krisha_listing(self) -> None:
+        with main.use_project(main.KERAMO_PROJECT_ID):
+            lead = main.create_or_update_contact(
+                phone="77000000073",
+                kind="lead",
+                source="krisha",
+                company="Коммерческое помещение в бизнес-центре",
+                status="sent",
+                stage="keramo_greeting_sent",
+                meta={
+                    "signal_fields": {
+                        "Объект": "Коммерческое помещение в бизнес-центре",
+                        "Город": "Астана",
+                        "Площадь": "180 м²",
+                        "Цена": "65 000 000 ₸",
+                    }
+                },
+            )
+
+            with (
+                patch.object(main, "send_and_log", AsyncMock()) as send_mock,
+                patch.object(main, "send_proposal", AsyncMock()) as proposal_mock,
+                patch.object(main, "call_ai", AsyncMock()) as ai_mock,
+            ):
+                await main.process_notification_body(self.inbound_body(str(lead["phone"]), "Здравствуйте"), allow_outbound=True)
+
+            updated = main.get_contact(lead["id"])
+            reply = send_mock.await_args.args[1]
+            self.assertEqual(updated["stage"], "keramo_listing_question_sent")
+            self.assertIn("Увидел ваше объявление на Крыше", reply)
+            self.assertIn("Коммерческое помещение", reply)
+            self.assertIn("Астана", reply)
+            self.assertIn("180", reply)
+            self.assertIn("Вы его продаете", reply)
+            self.assertNotIn("KERAMO", reply)
+            self.assertNotIn("инвест", reply.lower())
+            proposal_mock.assert_not_awaited()
+            ai_mock.assert_not_called()
+
+    async def test_keramo_listing_confirmation_reveals_offer(self) -> None:
+        with main.use_project(main.KERAMO_PROJECT_ID):
+            lead = main.create_or_update_contact(
+                phone="77000000074",
+                kind="lead",
+                source="krisha",
+                company="Коммерческое помещение",
+                status="replied",
+                stage="keramo_listing_question_sent",
+            )
+
+            with (
+                patch.object(main, "send_and_log", AsyncMock()) as send_mock,
+                patch.object(main, "send_proposal", AsyncMock()) as proposal_mock,
+                patch.object(main, "call_ai", AsyncMock()) as ai_mock,
+            ):
+                await main.process_notification_body(self.inbound_body(str(lead["phone"]), "Да, продаю"), allow_outbound=True)
+
+            updated = main.get_contact(lead["id"])
+            reply = send_mock.await_args.args[1]
+            self.assertEqual(updated["stage"], "awaiting_interest_confirmation")
+            self.assertIn("KERAMO BUILD", reply)
+            self.assertIn("партнера-инвестора", reply)
+            self.assertIn("КП", reply)
+            proposal_mock.assert_not_awaited()
+            ai_mock.assert_not_called()
+
+    async def test_keramo_listing_not_selling_closes_dialog(self) -> None:
+        with main.use_project(main.KERAMO_PROJECT_ID):
+            lead = main.create_or_update_contact(
+                phone="77000000075",
+                kind="lead",
+                source="krisha",
+                company="Коммерческое помещение",
+                status="replied",
+                stage="keramo_listing_question_sent",
+            )
+
+            with (
+                patch.object(main, "send_and_log", AsyncMock()) as send_mock,
+                patch.object(main, "send_proposal", AsyncMock()) as proposal_mock,
+                patch.object(main, "call_ai", AsyncMock()) as ai_mock,
+            ):
+                await main.process_notification_body(self.inbound_body(str(lead["phone"]), "Не продаю"), allow_outbound=True)
+
+            updated = main.get_contact(lead["id"])
+            self.assertEqual(updated["status"], "not_interested")
+            self.assertEqual(updated["stage"], "keramo_listing_not_selling")
+            self.assertIn("не буду отвлекать", send_mock.await_args.args[1].lower())
+            proposal_mock.assert_not_awaited()
+            ai_mock.assert_not_called()
+
     async def test_keramo_ambiguous_reaction_does_not_send_proposal(self) -> None:
         with main.use_project(main.KERAMO_PROJECT_ID):
             lead = self.create_lead("77000000063")
@@ -3228,9 +3344,11 @@ class DialogRuntimeTests(TempDbMixin, unittest.IsolatedAsyncioTestCase):
                 await main.process_notification_body(self.inbound_body(str(lead["phone"]), "Оу"), allow_outbound=True)
 
             updated = main.get_contact(lead["id"])
-            self.assertEqual(updated["stage"], "awaiting_interest_confirmation")
+            self.assertEqual(updated["stage"], "keramo_listing_question_sent")
             send_mock.assert_awaited_once()
-            self.assertIn("могу отправить короткое КП", send_mock.await_args.args[1])
+            self.assertIn("Увидел ваше объявление на Крыше", send_mock.await_args.args[1])
+            self.assertIn("Вы его продаете", send_mock.await_args.args[1])
+            self.assertNotIn("КП", send_mock.await_args.args[1])
             proposal_mock.assert_not_awaited()
             ai_mock.assert_not_called()
 
